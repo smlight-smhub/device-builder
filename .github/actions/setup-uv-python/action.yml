@@ -1,32 +1,42 @@
 name: Set up uv and managed Python
 description: |
   Installs uv and configures it for astral's PGO/LTO/BOLT/mimalloc-built
-  CPython at the requested version. setup-uv only sets ``UV_PYTHON``;
-  the interpreter itself is fetched lazily on the first ``uv venv`` /
-  ``uv pip install`` the caller runs, which is enough for every job
-  the composite is used in today.
+  CPython at the requested version, then installs that interpreter
+  explicitly on Linux/macOS so its provenance never depends on cache
+  history (without the install, ``uv venv`` silently falls back to the
+  runner's stock hostedtoolcache CPython whenever the managed-python
+  cache misses).
 
-  The previous explicit ``uv python install`` step has been removed
-  because it flakes on Windows when the cached interpreter dir is
-  restored: ``uv`` then tries to recreate the minor-version reparse
-  point and trips ``os error 4394`` ("mismatch between the tag
-  specified in the request and the tag present in the reparse
-  point"). ``uv venv`` doesn't recreate the link and so doesn't
-  collide. If a future job restores a cached venv without ever
-  running ``uv venv`` / ``uv pip`` (so the lazy install never
-  fires), re-add the explicit step gated on
-  ``runner.os != 'Windows'`` to dodge the same race.
+  On Windows the explicit install stays off: over a restored cached
+  interpreter dir, ``uv python install`` recreates the minor-version
+  reparse point and trips ``os error 4394`` ("mismatch between the tag
+  specified in the request and the tag present in the reparse point").
+  ``uv venv`` doesn't recreate the link and so doesn't collide; Windows
+  jobs run the runner's stock CPython.
 
-  Built for the 3.14 CI matrix where the tail-call interpreter
-  measurably shortens the suite; jobs that need stock CPython
-  (notably the CodSpeed benchmarks, where mimalloc + tail-call
-  dispatch would shift callgrind instruction counts) should stay
-  on ``actions/setup-python``.
+  The default Python setup for every job; jobs that need stock
+  CPython (notably the CodSpeed benchmarks, where mimalloc +
+  tail-call dispatch would shift callgrind instruction counts)
+  should stay on ``actions/setup-python``.
 
 inputs:
   python-version:
     description: The Python version uv should install and use.
     required: true
+  enable-cache:
+    description: |
+      Whether setup-uv caches the wheel cache dir. Callers that front
+      the install with a cached venv (restore-or-build-venv) pass
+      false — there the wheels only matter on a venv miss, and
+      restoring ~80 MB of them on every hit is pure tax.
+    default: "true"
+  uv-version:
+    description: |
+      The uv version setup-uv installs. Pinned: resolving "latest"
+      fetches astral's manifest from raw.githubusercontent.com, and
+      that fetch failing reds the job before checkout. Bump manually;
+      keep the benchmarks job's standalone setup-uv in sync.
+    default: "0.11.29"
 
 outputs:
   python-version:
@@ -38,12 +48,48 @@ runs:
   steps:
     - name: Set up uv
       id: uv
-      uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+      uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
       with:
+        version: ${{ inputs.uv-version }}
         python-version: ${{ inputs.python-version }}
-        enable-cache: true
-        cache-python: true
+        enable-cache: ${{ inputs.enable-cache }}
+        # Interpreter caching is owned below instead: setup-uv's own
+        # cache-python shares the wheel cache's dependency-file key
+        # (a pyproject edit re-downloads Python) and is a silent
+        # no-op when enable-cache is false.
+        cache-python: false
+        # The default prune (``uv cache prune --ci``) strips every
+        # registry-downloaded wheel before saving, so each run
+        # re-downloads all wheels. Keep them; size stays bounded
+        # because setup-uv only saves on key rotation.
+        prune-cache: false
         # Lint-only / codegen steps reuse this action without
         # touching deps, so the post-step cache save would
         # otherwise abort the job.
         ignore-nothing-to-cache: true
+
+    - name: Compute interpreter cache key
+      if: runner.os != 'Windows'
+      id: python-key
+      shell: bash
+      env:
+        PYTHON_VERSION: ${{ inputs.python-version }}
+      run: echo "key=managed-python-${RUNNER_OS}-${RUNNER_ARCH}-py${PYTHON_VERSION}-w$(date -u +%G%V)" >> "$GITHUB_OUTPUT"
+
+    - name: Cache managed Python
+      if: runner.os != 'Windows'
+      # Keyed on os/arch/version/ISO-week only — never on dependency
+      # files. The week stamp is how a new astral patch release gets
+      # picked up: while the cached interpreter satisfies the
+      # requested version, the install below is a no-op.
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      with:
+        path: ${{ env.UV_PYTHON_INSTALL_DIR }}
+        key: ${{ steps.python-key.outputs.key }}
+
+    - name: Install managed Python
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        PYTHON_VERSION: ${{ inputs.python-version }}
+      run: uv python install "${PYTHON_VERSION}"

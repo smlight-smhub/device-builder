@@ -1,0 +1,174 @@
+id: waveshare_esp32_c3_zero
+name: Waveshare ESP32-C3-Zero
+description: >
+  Ultra-compact ESP32-C3 module with castellated pads, 4MB onboard flash, USB-C connector and an onboard ceramic antenna.
+  No USB-UART bridge chip.
+manufacturer: Waveshare
+
+images:
+  - "https://www.waveshare.com/media/catalog/product/cache/1/image/800x800/9df78eab33525d08d6e5fb8d27136e95/e/s/esp32-c3-zero-1.jpg"
+  - "https://www.waveshare.com/media/catalog/product/cache/1/image/800x800/9df78eab33525d08d6e5fb8d27136e95/e/s/esp32-c3-zero-4.jpg"
+
+docs_url: https://esphome.io/components/esp32.html
+product_url: https://www.waveshare.com/esp32-c3-zero.htm
+is_generic: false
+
+esphome:
+  platform: esp32
+  board: esp32-c3-devkitm-1
+  variant: esp32c3
+  framework: esp-idf
+
+hardware:
+  flash_size: 4MB
+  ram_size: 327680
+  cpu_frequency: 160MHz
+  connectivity:
+    - wifi
+    - bluetooth
+
+tags:
+  - compact
+  - usb-c
+  - rgb-led
+
+featured_components:
+  - id: onboard_led
+    component_id: light.esp32_rmt_led_strip
+    name: Onboard RGB (WS2812B) status LED
+    description: Onboard RGB LED connected to GPIO10
+    fields:
+      pin: GPIO10
+      id: onboard_rgb_led
+      name: Onboard RGB LED
+      chipset: WS2812
+      num_leds: 1
+      rgb_order: RGB
+
+  - id: mcu_temperature
+    component_id: sensor.internal_temperature
+    name: Internal MCU Temperature
+    description: This allows you to use the integrated temperature sensor of the ESP32 chip.
+    fields:
+      name: Internal MCU Temperature
+      id: mcu_temperature
+      icon: mdi:cpu-32-bit
+      entity_category: diagnostic
+      disabled_by_default: true
+      device_class: temperature
+      unit_of_measurement: °C
+      accuracy_decimals: 1
+
+  - id: restart_button
+    component_id: button.restart
+    name: Restart button
+    description: Allows you to restart your node remotely through Home Assistant.
+    fields:
+      name: Restart
+      entity_category: config
+
+  - id: reset_button
+    component_id: button.factory_reset
+    name: Factory reset
+    description: Allows you to remotely invalidate (reset) all preferences stored in flash memory.
+    fields:
+      name: Restart with Factory Default Settings
+      entity_category: config
+      disabled_by_default: true
+
+pins:
+  - gpio: 0
+    label: "0"
+    features: [adc, pwm]
+    available: true
+    notes: "ADC1_CH0"
+  - gpio: 1
+    label: "1"
+    features: [adc, pwm]
+    available: true
+    notes: "ADC1_CH1"
+  - gpio: 2
+    label: "2"
+    features: [adc, pwm, strapping]
+    available: true
+    notes: "ADC1_CH2, Strapping pin"
+  - gpio: 3
+    label: "3"
+    features: [adc, pwm]
+    available: true
+    notes: "ADC1_CH3"
+  - gpio: 4
+    label: "4"
+    features: [adc, pwm, jtag]
+    available: true
+    notes: "ADC1_CH4"
+  - gpio: 5
+    label: "5"
+    features: [adc, pwm, jtag]
+    available: true
+    notes: "ADC2_CH0"
+  - gpio: 6
+    label: "6"
+    features: [pwm, jtag]
+    available: true
+  - gpio: 7
+    label: "7"
+    features: [pwm, jtag]
+    available: true
+  - gpio: 8
+    label: "8"
+    features: [pwm, strapping]
+    available: true
+    notes: "Strapping pin"
+  - gpio: 9
+    label: "9"
+    features: [pwm, strapping, boot_button]
+    occupied_by: "BOOT button"
+    available: true
+    notes: "Strapping pin"
+  - gpio: 10
+    label: "10"
+    features: [pwm, rgb_led]
+    occupied_by: "Onboard WS2812B RGB-LED"
+    available: true
+  - gpio: 11
+    available: false
+    occupied_by: "Internal Flash"
+  - gpio: 12
+    available: false
+    occupied_by: "Internal Flash"
+  - gpio: 13
+    available: false
+    occupied_by: "Internal Flash"
+  - gpio: 14
+    available: false
+    occupied_by: "Internal Flash"
+  - gpio: 15
+    available: false
+    occupied_by: "Internal Flash"
+  - gpio: 16
+    available: false
+    occupied_by: "Internal Flash"
+  - gpio: 17
+    available: false
+    occupied_by: "Internal Flash"
+  - gpio: 18
+    label: "18"
+    features: [usb_dm]
+    occupied_by: "USB D-"
+    available: true
+  - gpio: 19
+    label: "19"
+    features: [usb_dp]
+    occupied_by: "USB D+"
+    available: true
+  - gpio: 20
+    label: "20"
+    features: [uart_rx]
+    occupied_by: "Default UART0 receive data"
+    available: true
+  - gpio: 21
+    label: "21"
+    features: [uart_tx]
+    occupied_by: "Default UART0 transmit data"
+    available: true

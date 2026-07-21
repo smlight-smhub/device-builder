@@ -17,12 +17,13 @@ regressions, not async hygiene.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
+import logging
 import re
 import sys
 import tempfile as _tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -31,12 +32,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from blockbuster import blockbuster_ctx
 from esphome.core import CORE
-from esphome.storage_json import StorageJSON
 
 from esphome_device_builder.controllers._device_mqtt_coordinator import (
     DeviceMqttCoordinator,
 )
 from esphome_device_builder.controllers._device_state_monitor import DeviceStateMonitor
+from esphome_device_builder.controllers._device_state_monitor import mdns as _mdns_module
 from esphome_device_builder.controllers._device_state_monitor import ping as _ping_module
 from esphome_device_builder.controllers.boards import BoardCatalog
 from esphome_device_builder.controllers.components import ComponentCatalog
@@ -67,15 +68,6 @@ from esphome_device_builder.models import (
 
 if TYPE_CHECKING:
     from blockbuster import BlockBuster
-
-# True when the installed esphome's StorageJSON carries a ``toolchain``
-# field (>= 2026.5.0). That field is the exact dependency the offload path
-# keys native-IDF detection on (``toolchain == "esp-idf"``); older esphome
-# drops it on load, so tests that synthesize a native-IDF build skip there.
-# Probed off the StorageJSON signature directly rather than a correlated
-# const so the gate tracks the real runtime dependency. Mirrors the
-# native-IDF compile e2e gate.
-HAS_NATIVE_IDF_TOOLCHAIN = "toolchain" in inspect.signature(StorageJSON.__init__).parameters
 
 # Call sites known to do bounded blocking I/O during one-time server
 # startup, where the cost is paid once and not on the request path.
@@ -184,7 +176,7 @@ def _core_skip_external_update_default(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _stub_icmp_privilege_probe(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Bypass ``PingSource.run``'s ICMP socket privilege probe.
+    """Bypass ``PingSource._prepare``'s ICMP socket privilege probe.
 
     The real probe opens ``SOCK_RAW`` / ``SOCK_DGRAM`` against
     ``127.0.0.1``; on CI runners and locked-down dev machines
@@ -345,8 +337,12 @@ def make_remote_build_controller(
     db.devices = MagicMock()
     db.devices.zeroconf = None
     db._dashboard_advertiser = None
+    # ``dashboard_display_identity`` reads the public property; a bare
+    # MagicMock would be truthy and leak MagicMocks into JSON payloads.
+    db.dashboard_advertiser = None
     db.settings = MagicMock()
     db.settings.config_dir = config_dir
+    db.settings.on_ha_addon = False
     # Empty allowlist = trust-on-first-use (the default); a bare
     # MagicMock here would be truthy and break the ``pair_flow``
     # source guard's "no allowlist configured" branch.
@@ -417,6 +413,49 @@ async def cancel_and_drain(task: asyncio.Task[Any]) -> None:
     """
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
+
+
+@asynccontextmanager
+async def running_task(coro: Coroutine[Any, Any, Any]) -> AsyncIterator[asyncio.Task[Any]]:
+    """
+    Run *coro* as a background task, cancelling and draining it on exit.
+
+    Yields the :class:`asyncio.Task` so the body can await or inspect
+    it. On exit the task is cancelled and its ``CancelledError``
+    swallowed; any other exception it finished with is re-raised (when
+    the body itself didn't raise) so a crashed background task can't
+    pass silently.
+    """
+    task = asyncio.create_task(coro)
+    try:
+        yield task
+    finally:
+        task.cancel()
+        result = await asyncio.gather(task, return_exceptions=True)
+    exc = result[0]
+    if isinstance(exc, BaseException) and not isinstance(exc, asyncio.CancelledError):
+        raise exc
+
+
+async def wait_until(
+    condition: Callable[[], object],
+    timeout: float,
+    what: str,
+    *,
+    interval: float = 0,
+) -> None:
+    """
+    Poll *condition* until truthy; pytest.fail naming *what* on timeout.
+
+    ``interval`` defaults to a bare loop yield; pass a coarser one
+    when the condition tracks real-world time (e.g. a live broker).
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not condition():
+        if loop.time() >= deadline:
+            pytest.fail(f"timed out waiting for {what}")
+        await asyncio.sleep(interval)
 
 
 # ---------------------------------------------------------------------------
@@ -515,9 +554,11 @@ def session_board_catalog() -> BoardCatalog:
 
 
 @pytest.fixture(scope="session")
-def generated_board_catalog() -> BoardCatalogResponse:
-    """``script.sync_boards.build_catalog()`` run once per xdist worker.
+def generated_board_catalog_with_warnings() -> tuple[BoardCatalogResponse, list[logging.LogRecord]]:
+    """Run ``script.sync_boards.build_catalog()`` once per xdist worker.
 
+    Returns the catalog plus the WARNING records its ``sync_boards`` logger
+    emitted during that one build.
     Generation imports ESPHome's per-platform board modules and walks ~80
     manifests; the board-pin test modules pin to one worker via
     ``xdist_group("board_sync")`` so this runs a single time per suite.
@@ -528,7 +569,31 @@ def generated_board_catalog() -> BoardCatalogResponse:
     # suite during collection even when no test wants this fixture.
     from script.sync_boards import build_catalog  # noqa: PLC0415
 
-    return build_catalog()
+    records: list[logging.LogRecord] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Collect(level=logging.WARNING)
+    logger = logging.getLogger("sync_boards")
+    previous_level = logger.level
+    logger.setLevel(logging.WARNING)
+    logger.addHandler(handler)
+    try:
+        catalog = build_catalog()
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+    return catalog, records
+
+
+@pytest.fixture(scope="session")
+def generated_board_catalog(
+    generated_board_catalog_with_warnings: tuple[BoardCatalogResponse, list[logging.LogRecord]],
+) -> BoardCatalogResponse:
+    """Return the catalog half of ``generated_board_catalog_with_warnings``."""
+    return generated_board_catalog_with_warnings[0]
 
 
 @pytest.fixture(scope="session")
@@ -924,6 +989,10 @@ class RecordingMonitorCallbacks:
         self._flip(name, "ip", ip)
         self._flip(name, "ip_addresses", list(addresses))
 
+    def on_resolved_addresses_cleared(self, name: str) -> None:
+        self.calls.append(("on_resolved_addresses_cleared", name))
+        self._flip(name, "ip_addresses", [])
+
     def on_version_change(self, name: str, version: str) -> None:
         self.calls.append(("on_version_change", name, version))
         self._flip(name, "deployed_version", version)
@@ -939,6 +1008,16 @@ class RecordingMonitorCallbacks:
     def on_mac_address_change(self, name: str, mac: str) -> None:
         self.calls.append(("on_mac_address_change", name, mac))
         self._flip(name, "mac_address", mac)
+
+    def on_deployed_identity_live_change(self, name: str, *, live: bool) -> None:
+        self.calls.append(("on_deployed_identity_live_change", name, live))
+        self._flip(name, "deployed_identity_live", live)
+
+    def on_persisted_ip_invalidated(self, name: str, stale_ip: str) -> None:
+        self.calls.append(("on_persisted_ip_invalidated", name, stale_ip))
+        for device in self._devices:
+            if device.name == name and device.ip == stale_ip:
+                device.ip = ""
 
     def on_importable_added(self, device: AdoptableDevice) -> None:
         self.calls.append(("on_importable_added", device))
@@ -969,6 +1048,9 @@ def make_state_monitor_with_callbacks(
         on_config_hash_change=callbacks.on_config_hash_change,
         on_api_encryption_change=callbacks.on_api_encryption_change,
         on_mac_address_change=callbacks.on_mac_address_change,
+        on_persisted_ip_invalidated=callbacks.on_persisted_ip_invalidated,
+        on_resolved_addresses_cleared=callbacks.on_resolved_addresses_cleared,
+        on_deployed_identity_live_change=callbacks.on_deployed_identity_live_change,
     )
     return monitor, callbacks
 
@@ -1003,6 +1085,38 @@ def make_online_api_device(name: str = "kitchen", **overrides: Any) -> Device:
     }
     base.update(overrides)
     return make_device(name, **base)
+
+
+def make_stuck_offline_device(name: str = "kitchen", **overrides: Any) -> Device:
+    """OFFLINE API device whose only lead is the persisted ``ip`` (the reviver cohort)."""
+    base: dict[str, Any] = {
+        "state": DeviceState.OFFLINE,
+        "api_enabled": True,
+        "loaded_integrations": ["api", "wifi"],
+        "ip": "192.168.1.50",
+        "ip_addresses": [],
+    }
+    base.update(overrides)
+    return make_device(name, **base)
+
+
+def stub_async_service_info(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cached: bool = False,
+    resolved: bool = False,
+    addresses: tuple[str, ...] = ("192.168.1.50",),
+    properties: dict[str, str] | None = None,
+) -> MagicMock:
+    """Patch ``mdns.AsyncServiceInfo`` with a stub that hits the cache, the wire, or misses."""
+    info = MagicMock()
+    info.name = "kitchen._esphomelib._tcp.local."
+    info.load_from_cache.return_value = cached
+    info.async_request = AsyncMock(return_value=resolved)
+    info.parsed_scoped_addresses.return_value = list(addresses)
+    info.decoded_properties = properties if properties is not None else {"version": "2026.7.0"}
+    monkeypatch.setattr(_mdns_module, "AsyncServiceInfo", lambda *_a, **_kw: info)
+    return info
 
 
 def make_peer_link_session(

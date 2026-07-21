@@ -48,6 +48,11 @@ featured_components:
         inverted: true
       locked: true
     internal: true
+    filters:
+      value:
+      - invert: null
+      - delayed_off: 50ms
+      locked: true
     id: button
     name: button
 - id: switch_1
@@ -62,6 +67,10 @@ featured_components:
       locked: true
     icon: mdi:light-switch
     entity_category: diagnostic
+    filters:
+      value:
+      - delayed_on_off: 50ms
+      locked: true
     id: switch_1
     name: Switch 1 (external)
 - id: switch_2
@@ -75,6 +84,10 @@ featured_components:
       locked: true
     icon: mdi:light-switch
     entity_category: diagnostic
+    filters:
+      value:
+      - delayed_on_off: 50ms
+      locked: true
     id: switch_2
     name: Switch 2 (external)
 - id: default_status_led
@@ -115,5 +128,5 @@ source:
   type: esphome-devices
   remote_id: Nous-B3T
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Nous-B3T/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: a4605e782cd37ecf47e5db4b0f3ffa7c92073b27f6ad6e941ddd9589ab8a6836

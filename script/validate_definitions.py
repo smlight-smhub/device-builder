@@ -31,7 +31,15 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 # Imported from the stdlib-only constants module so this script stays light.
-from esphome_device_builder.constants import BOARD_PIN_KEYS, BUS_CATEGORIES  # noqa: E402
+from esphome_device_builder.constants import (  # noqa: E402
+    BOARD_PIN_KEYS,
+    BUS_CATEGORIES,
+    FEATURED_EXCLUDED_CATEGORIES,
+)
+from esphome_device_builder.helpers.lazy_catalog import (  # noqa: E402
+    is_external_image_url,
+    is_unsafe_manifest_path,
+)
 from script._component_catalog import load_component_catalog  # noqa: E402
 from script._manifest import ManifestError, load_manifest_dict  # noqa: E402
 
@@ -39,10 +47,6 @@ DEFINITIONS_DIR = _REPO_ROOT / "esphome_device_builder" / "definitions"
 SCHEMAS_DIR = DEFINITIONS_DIR / "schemas"
 COMPONENTS_INDEX_JSON = DEFINITIONS_DIR / "components.index.json"
 COMPONENTS_BODIES_DIR = DEFINITIONS_DIR / "components"
-
-# Categories excluded from featured-component eligibility — these belong in
-# the dedicated "Add core configuration" dialog, not in board recommendations.
-_FEATURED_EXCLUDED_CATEGORIES = {"core", "ota", "time", "update"}
 
 # Network components offered as board "suggested hardware" despite their
 # ``core`` category — auto-pulled in place of wifi: when a board has onboard
@@ -117,6 +121,28 @@ _BOARD_PIN_FEATURES = {
     "boot_button",
 }
 
+# Usable RAM per chip as platformio's ``maximum_ram_size`` reports it — the
+# catalog convention for ``hardware.ram_size``. Datasheet SRAM figures differ
+# (esp32c3: 400KB SRAM vs 320KB usable).
+_CHIP_MAX_RAM: dict[str, int] = {
+    "esp32": 327680,
+    "esp32s2": 327680,
+    "esp32s3": 327680,
+    "esp32c3": 327680,
+    "esp32c5": 327680,
+    "esp32c6": 327680,
+    "esp32c61": 327680,
+    "esp32h2": 327680,
+    "esp8266": 81920,
+    "rp2040": 262144,
+    "rp2350": 524288,
+}
+
+# platformio declares PSRAM-inclusive maximum_ram_size for PSRAM boards
+# (m5stack-core2: 4521984); a manifest value at or above this follows that
+# convention deliberately, so only sub-threshold mismatches warn.
+_PSRAM_INCLUSIVE_MIN = 1024 * 1024
+
 # Load JSON schemas if jsonschema is available
 _BOARD_SCHEMA: dict | None = None
 _COMPONENT_SCHEMA: dict | None = None
@@ -142,21 +168,30 @@ def _validate_against_schema(data: dict, schema: dict | None, item_id: str) -> l
     return errors
 
 
-def validate_board(manifest: Path, components_index: dict | None = None) -> list[str]:
+def validate_board(
+    manifest: Path,
+    components_index: dict | None = None,
+    data: dict | None = None,
+    all_boards: dict[str, dict] | None = None,
+) -> list[str]:
     """
     Validate a board manifest. Returns list of error messages.
 
     *components_index* is the dict returned by :func:`_build_components_index`;
     when provided, featured-component cross-references are validated against
-    the live component catalog.
+    the live component catalog. *data* is the already-parsed manifest, to
+    save a caller that parsed it for other checks the second read.
+    *all_boards* maps every board id to its parsed manifest; when provided,
+    ``pins_from`` cross-references are validated against it.
     """
     errors: list[str] = []
     board_id = manifest.parent.name
 
-    try:
-        data = load_manifest_dict(manifest)
-    except ManifestError as exc:
-        return [f"{board_id}: {exc}"]
+    if data is None:
+        try:
+            data = load_manifest_dict(manifest)
+        except ManifestError as exc:
+            return [f"{board_id}: {exc}"]
 
     # JSON Schema validation
     errors.extend(_validate_against_schema(data, _BOARD_SCHEMA, board_id))
@@ -186,6 +221,8 @@ def validate_board(manifest: Path, components_index: dict | None = None) -> list
     # intersection check for these; the rest of featured-component
     # validation (component_id present, fields key match,
     # GPIO declared) still runs.
+    errors.extend(_validate_pins_from(board_id, data, all_boards))
+
     is_imported = isinstance(data.get("source"), dict) and bool(data["source"].get("type"))
 
     # Featured components & bundles — cross-catalog validation against
@@ -194,7 +231,181 @@ def validate_board(manifest: Path, components_index: dict | None = None) -> list
 
     errors.extend(_validate_wifi_radio_claim(board_id, data))
 
+    errors.extend(_validate_image_paths(board_id, data))
+
     return errors
+
+
+def _validate_pins_from(
+    board_id: str,
+    data: dict,
+    all_boards: dict[str, dict] | None,
+) -> list[str]:
+    """``pins_from`` must name an existing same-chip board with a pin table.
+
+    The mutual exclusivity with ``pins`` also forbids donor chains: a board
+    named by ``pins_from`` necessarily carries its own table.
+    """
+    donor_id = data.get("pins_from")
+    if donor_id is None:
+        return []
+    errors: list[str] = []
+    if "pins" in data:
+        errors.append(f"{board_id}: pins_from and pins are mutually exclusive")
+    if all_boards is None:
+        return errors
+    donor = all_boards.get(donor_id)
+    if donor is None:
+        errors.append(f"{board_id}: pins_from '{donor_id}' is not a known board")
+        return errors
+    if not donor.get("pins"):
+        errors.append(f"{board_id}: pins_from '{donor_id}' has no pin table")
+    ours = data.get("esphome") or {}
+    theirs = donor.get("esphome") or {}
+    if (ours.get("platform"), ours.get("variant")) != (
+        theirs.get("platform"),
+        theirs.get("variant"),
+    ):
+        errors.append(f"{board_id}: pins_from '{donor_id}' is a different chip")
+    return errors
+
+
+def collect_hardware_warnings(board_id: str, data: dict) -> list[str]:
+    """
+    Best-effort convention checks on ``hardware`` — warnings, never errors.
+
+    Checks needing the installed esphome's board tables skip silently
+    when esphome isn't importable.
+    """
+    esphome_cfg = data.get("esphome")
+    hardware = data.get("hardware")
+    if not isinstance(esphome_cfg, dict) or not isinstance(hardware, dict):
+        return []
+    checks = (
+        _variant_warning(board_id, esphome_cfg),
+        _ram_warning(board_id, esphome_cfg, hardware),
+        _flash_warning(board_id, esphome_cfg, hardware),
+    )
+    return [warning for warning in checks if warning is not None]
+
+
+def _esp32_table_variant(esphome_cfg: dict) -> str | None:
+    """Return the installed esphome's variant for the manifest's esp32 board, if resolvable."""
+    if esphome_cfg.get("platform") != "esp32":
+        return None
+    if (tables := _esphome_boards_table("esp32")) is None:
+        return None
+    meta = tables.get(esphome_cfg.get("board"))
+    if isinstance(meta, dict) and isinstance(meta.get("variant"), str):
+        return meta["variant"].lower()
+    return None
+
+
+def _variant_warning(board_id: str, esphome_cfg: dict) -> str | None:
+    declared = esphome_cfg.get("variant")
+    table_variant = _esp32_table_variant(esphome_cfg)
+    if (
+        isinstance(declared, str)
+        and table_variant is not None
+        and declared.lower() != table_variant
+    ):
+        return (
+            f"{board_id}: esphome.variant '{declared}' does not match "
+            f"'{table_variant}' declared for board '{esphome_cfg.get('board')}' "
+            f"by the installed esphome"
+        )
+    return None
+
+
+def _resolve_chip(esphome_cfg: dict) -> str | None:
+    """Return the ``_CHIP_MAX_RAM`` key for the manifest's chip, or None."""
+    platform = esphome_cfg.get("platform")
+    if platform == "esp32":
+        declared = esphome_cfg.get("variant")
+        if isinstance(declared, str):
+            return declared.lower()
+        return _esp32_table_variant(esphome_cfg)
+    if platform == "esp8266":
+        return "esp8266"
+    if platform == "rp2040":
+        mcu = esphome_cfg.get("mcu")
+        if mcu is None and (tables := _esphome_boards_table("rp2040")) is not None:
+            meta = tables.get(esphome_cfg.get("board"))
+            if isinstance(meta, dict):
+                mcu = meta.get("mcu")
+        return mcu.lower() if isinstance(mcu, str) else None
+    return None
+
+
+def _ram_warning(board_id: str, esphome_cfg: dict, hardware: dict) -> str | None:
+    ram = hardware.get("ram_size")
+    chip = _resolve_chip(esphome_cfg)
+    if (
+        isinstance(ram, int)
+        and chip in _CHIP_MAX_RAM
+        and ram != _CHIP_MAX_RAM[chip]
+        and ram < _PSRAM_INCLUSIVE_MIN
+    ):
+        return (
+            f"{board_id}: ram_size {ram} differs from {chip}'s usable RAM "
+            f"{_CHIP_MAX_RAM[chip]} (platformio maximum_ram_size); datasheet "
+            f"SRAM figures don't belong here"
+        )
+    return None
+
+
+def _flash_warning(board_id: str, esphome_cfg: dict, hardware: dict) -> str | None:
+    flash = hardware.get("flash_size")
+    board = esphome_cfg.get("board")
+    if (
+        esphome_cfg.get("platform") == "esp8266"
+        and isinstance(flash, str)
+        and (flash_bytes := _flash_str_to_bytes(flash)) is not None
+        and (tables := _esphome_boards_table("esp8266")) is not None
+        and isinstance(meta := tables.get(board), dict)
+        and isinstance(meta.get("flash_size"), int)
+        and meta["flash_size"] != flash_bytes
+    ):
+        return (
+            f"{board_id}: flash_size {flash} ({flash_bytes} bytes) differs from "
+            f"{meta['flash_size']} bytes declared for board '{board}' by the "
+            f"installed esphome"
+        )
+    return None
+
+
+def _esphome_boards_table(platform: str) -> dict | None:
+    """Return the installed esphome's ``BOARDS`` table for *platform*, or None when unimportable."""
+    if platform not in _ESPHOME_BOARDS_CACHE:
+        # Broad except: warnings must never turn into a crash, even on a
+        # broken esphome install.
+        try:
+            module = __import__(f"esphome.components.{platform}.boards", fromlist=["BOARDS"])
+        except Exception:
+            _ESPHOME_BOARDS_CACHE[platform] = None
+        else:
+            table = getattr(module, "BOARDS", None)
+            if table is None:
+                # esphome imports but the table moved: say so once, or an
+                # upstream refactor silently disables every table check.
+                print(
+                    f"WARNING: esphome.components.{platform}.boards has no BOARDS "
+                    "table; hardware convention checks that need it are skipped",
+                    file=sys.stderr,
+                )
+            _ESPHOME_BOARDS_CACHE[platform] = table
+    return _ESPHOME_BOARDS_CACHE[platform]
+
+
+_ESPHOME_BOARDS_CACHE: dict[str, dict | None] = {}
+
+_FLASH_SIZE_RE = re.compile(r"^(\d+(?:\.\d+)?)MB$")
+
+
+def _flash_str_to_bytes(flash: str) -> int | None:
+    """``"4MB"`` / ``"0.5MB"`` in bytes, or None when unparseable."""
+    match = _FLASH_SIZE_RE.match(flash)
+    return int(float(match.group(1)) * 1024 * 1024) if match else None
 
 
 def _build_components_index() -> dict | None:
@@ -303,6 +514,24 @@ def _validate_wifi_radio_claim(board_id: str, data: dict) -> list[str]:
         f"'{variant}' without a default component providing a Wi-Fi radio "
         f"({', '.join(sorted(_WIFI_RADIO_COMPONENT_IDS))}) — the generator "
         "would emit a wifi block the chip cannot validate"
+    ]
+
+
+def _validate_image_paths(board_id: str, data: dict) -> list[str]:
+    """Reject local image paths that are absolute or escape the board dir."""
+    candidates: list[tuple[str, object]] = [
+        ("images entry", entry) for entry in data.get("images") or []
+    ]
+    for section in ("featured_components", "featured_bundles"):
+        candidates.extend(
+            (f"{section} image_url", item.get("image_url"))
+            for item in data.get(section) or []
+            if isinstance(item, dict)
+        )
+    return [
+        f"{board_id}: {label} '{raw}' must be a relative path inside the board dir"
+        for label, raw in candidates
+        if isinstance(raw, str) and not is_external_image_url(raw) and is_unsafe_manifest_path(raw)
     ]
 
 
@@ -458,7 +687,7 @@ def _validate_featured_component(  # noqa: C901
 
     component = components_index[component_id]
     if (
-        component.get("category") in _FEATURED_EXCLUDED_CATEGORIES
+        component.get("category") in FEATURED_EXCLUDED_CATEGORIES
         and component_id not in _FEATURED_CATEGORY_EXCEPTIONS
     ):
         errors.append(
@@ -696,13 +925,23 @@ def main() -> int:
     args = parser.parse_args()
 
     all_errors: list[str] = []
+    all_warnings: list[str] = []
 
     components_index = _build_components_index()
 
-    # Validate boards
+    # Validate boards. Parse everything first so cross-board references
+    # (pins_from) can resolve against the full set.
     boards_dir = DEFINITIONS_DIR / "boards"
+    parsed: dict[Path, dict] = {}
     for manifest in sorted(boards_dir.glob("*/manifest.yaml")):
-        all_errors.extend(validate_board(manifest, components_index))
+        try:
+            parsed[manifest] = load_manifest_dict(manifest)
+        except ManifestError as exc:
+            all_errors.append(f"{manifest.parent.name}: {exc}")
+    all_boards = {manifest.parent.name: data for manifest, data in parsed.items()}
+    for manifest, data in parsed.items():
+        all_errors.extend(validate_board(manifest, components_index, data, all_boards))
+        all_warnings.extend(collect_hardware_warnings(manifest.parent.name, data))
 
     # Validate components
     components_dir = DEFINITIONS_DIR / "components"
@@ -711,6 +950,9 @@ def main() -> int:
 
     if args.check_images:
         all_errors.extend(check_board_images(boards_dir))
+
+    for warning in all_warnings:
+        print(f"WARNING: {warning}", file=sys.stderr)
 
     if all_errors:
         for error in all_errors:

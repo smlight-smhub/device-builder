@@ -13,27 +13,52 @@ hardware:
 images:
 - https://raw.githubusercontent.com/esphome/devices.esphome.io/main/src/docs/devices/Tuya-ZY-M100-Human-Presence-Sensor/tuya-zy-m100.jpg
 - https://raw.githubusercontent.com/esphome/devices.esphome.io/main/src/docs/devices/Tuya-ZY-M100-Human-Presence-Sensor/test_board.jpg
+pins:
+- gpio: 20
+  available: false
+  occupied_by: uart
+- gpio: 21
+  available: false
+  occupied_by: uart
 docs_url: https://devices.esphome.io/devices/Tuya-ZY-M100-Human-Presence-Sensor/
 featured_components:
+- id: uart_bus
+  component_id: uart
+  fields:
+    rx_pin:
+      value: 20
+      locked: true
+    tx_pin:
+      value: 21
+      locked: true
+    baud_rate: 115200
+- id: tuya_hub
+  component_id: tuya
+  fields: {}
+  requires:
+  - uart_bus
 - id: binary_sensor_tuya_1
   component_id: binary_sensor.tuya
   fields:
     sensor_datapoint: 1
     device_class: occupancy
     id: binary_sensor_tuya_1
-    name: Presence State
+    name: Tuya ZY-M100 Human Prescence Sensor Presence State
+  requires:
+  - uart_bus
+  - tuya_hub
 - id: restart_device
   component_id: button.restart
   fields:
     entity_category: diagnostic
     id: restart_device
-    name: Restart
+    name: Tuya ZY-M100 Human Prescence Sensor Restart
 - id: restart_device_safe_mode
   component_id: button.safe_mode
   fields:
     entity_category: diagnostic
     id: restart_device_safe_mode
-    name: Restart (Safe Mode)
+    name: Tuya ZY-M100 Human Prescence Sensor Restart (Safe Mode)
 - id: number_tuya_1
   component_id: number.tuya
   fields:
@@ -43,7 +68,10 @@ featured_components:
     step: 1
     icon: mdi:ray-vertex
     id: number_tuya_1
-    name: Sensitivity
+    name: Tuya ZY-M100 Human Prescence Sensor Sensitivity
+  requires:
+  - uart_bus
+  - tuya_hub
 - id: number_tuya_2
   component_id: number.tuya
   fields:
@@ -55,7 +83,10 @@ featured_components:
     unit_of_measurement: cm
     icon: mdi:signal-distance-variant
     id: number_tuya_2
-    name: Near Detection
+    name: Tuya ZY-M100 Human Prescence Sensor Near Detection
+  requires:
+  - uart_bus
+  - tuya_hub
 - id: number_tuya_3
   component_id: number.tuya
   fields:
@@ -67,7 +98,10 @@ featured_components:
     unit_of_measurement: cm
     icon: mdi:signal-distance-variant
     id: number_tuya_3
-    name: Far Detection
+    name: Tuya ZY-M100 Human Prescence Sensor Far Detection
+  requires:
+  - uart_bus
+  - tuya_hub
 - id: number_tuya_4
   component_id: number.tuya
   fields:
@@ -79,7 +113,10 @@ featured_components:
     mode: slider
     icon: mdi:clock
     id: number_tuya_4
-    name: Detection Delay
+    name: Tuya ZY-M100 Human Prescence Sensor Detection Delay
+  requires:
+  - uart_bus
+  - tuya_hub
 - id: number_tuya_5
   component_id: number.tuya
   fields:
@@ -91,27 +128,23 @@ featured_components:
     mode: slider
     icon: mdi:clock
     id: number_tuya_5
-    name: Fading Time
-- id: select_tuya_1
-  component_id: select.tuya
-  fields:
-    icon: mdi:eye
-    enum_datapoint: 6
-    id: select_tuya_1
-    name: Self Check Result
+    name: Tuya ZY-M100 Human Prescence Sensor Fading Time
+  requires:
+  - uart_bus
+  - tuya_hub
 - id: sensor_wifi_signal_1
   component_id: sensor.wifi_signal
   fields:
     update_interval: 60s
     internal: true
     id: sensor_wifi_signal_1
-    name: Signal strength
+    name: Tuya ZY-M100 Human Prescence Sensor Signal strength
 - id: uptime_sensor
   component_id: sensor.uptime
   fields:
     update_interval: 360s
     id: uptime_sensor
-    name: Uptime
+    name: Tuya ZY-M100 Human Prescence Sensor Uptime
 - id: light_intensity
   component_id: sensor.tuya
   fields:
@@ -121,7 +154,10 @@ featured_components:
     device_class: illuminance
     state_class: measurement
     id: light_intensity
-    name: Light Intensity
+    name: Tuya ZY-M100 Human Prescence Sensor Light Intensity
+  requires:
+  - uart_bus
+  - tuya_hub
 - id: target_distance
   component_id: sensor.tuya
   fields:
@@ -131,10 +167,13 @@ featured_components:
     device_class: distance
     state_class: measurement
     id: target_distance
-    name: Target Distance
+    name: Tuya ZY-M100 Human Prescence Sensor Target Distance
+  requires:
+  - uart_bus
+  - tuya_hub
 source:
   type: esphome-devices
   remote_id: Tuya-ZY-M100-Human-Presence-Sensor
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Tuya-ZY-M100-Human-Presence-Sensor/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 357305a91aaf554b4ff971a4d8f877bd052ccf251a340aca7be957c2924b6437

@@ -16,14 +16,67 @@ pins:
 - gpio: 0
   available: false
   occupied_by: Ethernet CLK
+- gpio: 4
+  available: false
+  occupied_by: mbus
+- gpio: 14
+  available: false
+  occupied_by: modbus1
 - gpio: 18
   available: false
   occupied_by: Ethernet MDIO
 - gpio: 23
   available: false
   occupied_by: Ethernet MDC
+- gpio: 36
+  available: false
+  occupied_by: mbus
 docs_url: https://devices.esphome.io/devices/Genvex-Nibe-AlphaInnotec-heat-recovery-ventilation/
 featured_components:
+- id: modbus1
+  component_id: modbus
+  fields:
+    flow_control_pin:
+      value: 14
+      locked: true
+    id:
+      value: modbus1
+      locked: true
+    uart_id:
+      value: mbus
+      locked: true
+  requires:
+  - mbus
+- id: mbus
+  component_id: uart
+  fields:
+    tx_pin:
+      value: 4
+      locked: true
+    rx_pin:
+      value: 36
+      locked: true
+    baud_rate: 19600
+    parity: EVEN
+    id:
+      value: mbus
+      locked: true
+- id: genvex_modbus
+  component_id: modbus_controller
+  fields:
+    address: 1
+    setup_priority: -10
+    command_throttle: 20ms
+    update_interval: 5s
+    id:
+      value: genvex_modbus
+      locked: true
+    modbus_id:
+      value: modbus1
+      locked: true
+  requires:
+  - modbus1
+  - mbus
 - id: onboard_ethernet
   component_id: ethernet
   name: Onboard Ethernet
@@ -55,6 +108,10 @@ featured_components:
     bitmask: 1
     id: binary_sensor_modbus_controller_1
     name: Alarm General Error
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: binary_sensor_modbus_controller_2
   component_id: binary_sensor.modbus_controller
   fields:
@@ -65,6 +122,10 @@ featured_components:
     bitmask: 2
     id: binary_sensor_modbus_controller_2
     name: Bypass1
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: binary_sensor_modbus_controller_3
   component_id: binary_sensor.modbus_controller
   fields:
@@ -74,6 +135,10 @@ featured_components:
     bitmask: 4
     id: binary_sensor_modbus_controller_3
     name: Relay R9
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: binary_sensor_modbus_controller_4
   component_id: binary_sensor.modbus_controller
   fields:
@@ -84,6 +149,10 @@ featured_components:
     bitmask: 8
     id: binary_sensor_modbus_controller_4
     name: Alarm Filter
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: binary_sensor_modbus_controller_5
   component_id: binary_sensor.modbus_controller
   fields:
@@ -94,6 +163,10 @@ featured_components:
     bitmask: 16
     id: binary_sensor_modbus_controller_5
     name: Alarm Frost
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: binary_sensor_modbus_controller_6
   component_id: binary_sensor.modbus_controller
   fields:
@@ -104,6 +177,10 @@ featured_components:
     bitmask: 64
     id: binary_sensor_modbus_controller_6
     name: Alarm Hygrostat
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: binary_sensor_modbus_controller_7
   component_id: binary_sensor.modbus_controller
   fields:
@@ -114,6 +191,10 @@ featured_components:
     bitmask: 128
     id: binary_sensor_modbus_controller_7
     name: Alarm Device Stopped
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: binary_sensor_modbus_controller_8
   component_id: binary_sensor.modbus_controller
   fields:
@@ -124,6 +205,10 @@ featured_components:
     bitmask: 1024
     id: binary_sensor_modbus_controller_8
     name: Bypass2
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: binary_sensor_modbus_controller_9
   component_id: binary_sensor.modbus_controller
   fields:
@@ -134,6 +219,10 @@ featured_components:
     disabled_by_default: true
     id: binary_sensor_modbus_controller_9
     name: Relay R8
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: binary_sensor_modbus_controller_10
   component_id: binary_sensor.modbus_controller
   fields:
@@ -144,6 +233,10 @@ featured_components:
     disabled_by_default: true
     id: binary_sensor_modbus_controller_10
     name: Relay R2 Electric Reheating
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: binary_sensor_modbus_controller_11
   component_id: binary_sensor.modbus_controller
   fields:
@@ -154,18 +247,22 @@ featured_components:
     disabled_by_default: true
     id: binary_sensor_modbus_controller_11
     name: Relay R3 Preheating
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: button_restart_1
   component_id: button.restart
   fields:
     entity_category: diagnostic
     id: button_restart_1
-    name: controller restart
+    name: Ventitaltion controller restart
 - id: button_safe_mode_1
   component_id: button.safe_mode
   fields:
     entity_category: diagnostic
     id: button_safe_mode_1
-    name: controller safe mode boot
+    name: Ventitaltion controller safe mode boot
 - id: number_modbus_controller_1
   component_id: number.modbus_controller
   fields:
@@ -179,7 +276,11 @@ featured_components:
     step: 1
     mode: box
     id: number_modbus_controller_1
-    name: Max duration for level 3-4
+    name: Ventitaltion Max duration for level 3-4
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: genvex_speed_in_1
   component_id: number.modbus_controller
   fields:
@@ -193,7 +294,11 @@ featured_components:
     step: 1
     mode: box
     id: genvex_speed_in_1
-    name: Level 1 supply
+    name: Ventitaltion Level 1 supply
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: genvex_speed_out_1
   component_id: number.modbus_controller
   fields:
@@ -207,7 +312,11 @@ featured_components:
     step: 1
     mode: box
     id: genvex_speed_out_1
-    name: Level 1 extract
+    name: Ventitaltion Level 1 extract
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: genvex_speed_in_2
   component_id: number.modbus_controller
   fields:
@@ -221,7 +330,11 @@ featured_components:
     step: 1
     mode: box
     id: genvex_speed_in_2
-    name: Level 2 supply
+    name: Ventitaltion Level 2 supply
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: genvex_speed_out_2
   component_id: number.modbus_controller
   fields:
@@ -235,7 +348,11 @@ featured_components:
     step: 1
     mode: box
     id: genvex_speed_out_2
-    name: Level 2 extract
+    name: Ventitaltion Level 2 extract
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: genvex_speed_in_3
   component_id: number.modbus_controller
   fields:
@@ -249,7 +366,11 @@ featured_components:
     step: 1
     mode: box
     id: genvex_speed_in_3
-    name: Level 3 supply
+    name: Ventitaltion Level 3 supply
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: genvex_speed_out_3
   component_id: number.modbus_controller
   fields:
@@ -263,7 +384,11 @@ featured_components:
     step: 1
     mode: box
     id: genvex_speed_out_3
-    name: Level 3 extract
+    name: Ventitaltion Level 3 extract
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: number_modbus_controller_8
   component_id: number.modbus_controller
   fields:
@@ -277,7 +402,11 @@ featured_components:
     step: 1
     mode: box
     id: number_modbus_controller_8
-    name: Bypass close external delta
+    name: Ventitaltion Bypass close external delta
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: number_modbus_controller_9
   component_id: number.modbus_controller
   fields:
@@ -292,38 +421,11 @@ featured_components:
     mode: box
     disabled_by_default: true
     id: number_modbus_controller_9
-    name: Filter change period
-- id: genvex_sel
-  component_id: select.modbus_controller
-  fields:
-    icon: mdi:fan
-    address: 0
-    value_type: U_WORD
-    optimistic: true
-    id: genvex_sel
-    name: Speed
-- id: select_modbus_controller_2
-  component_id: select.modbus_controller
-  fields:
-    icon: mdi:cog-outline
-    entity_category: config
-    address: 41
-    value_type: U_WORD
-    skip_updates: 24
-    disabled_by_default: true
-    id: select_modbus_controller_2
-    name: Display model
-- id: select_modbus_controller_3
-  component_id: select.modbus_controller
-  fields:
-    icon: mdi:cog-outline
-    entity_category: config
-    address: 16
-    value_type: U_WORD
-    skip_updates: 24
-    disabled_by_default: true
-    id: select_modbus_controller_3
-    name: Regulation method
+    name: Ventitaltion Filter change period
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: genvex_inlet_fan
   component_id: sensor.modbus_controller
   fields:
@@ -333,7 +435,11 @@ featured_components:
     unit_of_measurement: '%'
     value_type: U_WORD
     id: genvex_inlet_fan
-    name: Inlet fan
+    name: Ventitaltion Inlet fan
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: genvex_extract_fan
   component_id: sensor.modbus_controller
   fields:
@@ -343,7 +449,11 @@ featured_components:
     unit_of_measurement: '%'
     value_type: U_WORD
     id: genvex_extract_fan
-    name: Extract fan
+    name: Ventitaltion Extract fan
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: sensor_modbus_controller_3
   component_id: sensor.modbus_controller
   fields:
@@ -353,8 +463,19 @@ featured_components:
     unit_of_measurement: °C
     value_type: U_WORD
     accuracy_decimals: 1
+    filters:
+      value:
+      - filter_out: 0
+      - heartbeat: 120s
+      - offset: -300
+      - multiply: 0.1
+      locked: true
     id: sensor_modbus_controller_3
-    name: Supply air
+    name: Ventitaltion Supply air
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: sensor_modbus_controller_4
   component_id: sensor.modbus_controller
   fields:
@@ -364,8 +485,19 @@ featured_components:
     unit_of_measurement: °C
     value_type: U_WORD
     accuracy_decimals: 1
+    filters:
+      value:
+      - filter_out: 0
+      - heartbeat: 120s
+      - offset: -300
+      - multiply: 0.1
+      locked: true
     id: sensor_modbus_controller_4
-    name: Fresh air
+    name: Ventitaltion Fresh air
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: sensor_modbus_controller_5
   component_id: sensor.modbus_controller
   fields:
@@ -375,8 +507,19 @@ featured_components:
     unit_of_measurement: °C
     value_type: U_WORD
     accuracy_decimals: 1
+    filters:
+      value:
+      - filter_out: 0
+      - heartbeat: 120s
+      - offset: -300
+      - multiply: 0.1
+      locked: true
     id: sensor_modbus_controller_5
-    name: Exhaust air
+    name: Ventitaltion Exhaust air
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: genvex_temp_t7
   component_id: sensor.modbus_controller
   fields:
@@ -386,8 +529,19 @@ featured_components:
     unit_of_measurement: °C
     value_type: U_WORD
     accuracy_decimals: 1
+    filters:
+      value:
+      - filter_out: 0
+      - heartbeat: 120s
+      - offset: -300
+      - multiply: 0.1
+      locked: true
     id: genvex_temp_t7
-    name: Extract air
+    name: Ventitaltion Extract air
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: sensor_modbus_controller_7
   component_id: sensor.modbus_controller
   fields:
@@ -397,7 +551,11 @@ featured_components:
     address: 11
     value_type: U_WORD
     id: sensor_modbus_controller_7
-    name: Bypass
+    name: Ventitaltion Bypass
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: genvex_hum
   component_id: sensor.modbus_controller
   fields:
@@ -406,8 +564,17 @@ featured_components:
     register_type: read
     address: 13
     value_type: U_WORD
+    filters:
+      value:
+      - filter_out: 0
+      - heartbeat: 120s
+      locked: true
     id: genvex_hum
-    name: Humidity
+    name: Ventitaltion Humidity
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: genvex_mode
   component_id: sensor.modbus_controller
   fields:
@@ -419,7 +586,11 @@ featured_components:
     disabled_by_default: true
     bitmask: 2147483647
     id: genvex_mode
-    name: Mode (modbus)
+    name: Ventitaltion Mode (modbus)
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: sensor_modbus_controller_10
   component_id: sensor.modbus_controller
   fields:
@@ -431,7 +602,11 @@ featured_components:
     disabled_by_default: true
     bitmask: 2147483647
     id: sensor_modbus_controller_10
-    name: Alarm code (DEC)
+    name: Ventitaltion Alarm code (DEC)
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: sensor_modbus_controller_11
   component_id: sensor.modbus_controller
   fields:
@@ -442,7 +617,11 @@ featured_components:
     value_type: U_WORD
     bitmask: 2147483647
     id: sensor_modbus_controller_11
-    name: Reheating
+    name: Ventitaltion Reheating
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: sensor_modbus_controller_12
   component_id: sensor.modbus_controller
   fields:
@@ -453,7 +632,11 @@ featured_components:
     value_type: U_WORD
     bitmask: 2147483647
     id: sensor_modbus_controller_12
-    name: Reheating control
+    name: Ventitaltion Reheating control
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: switch_modbus_controller_1
   component_id: switch.modbus_controller
   fields:
@@ -463,7 +646,11 @@ featured_components:
     address: 1
     bitmask: 1
     id: switch_modbus_controller_1
-    name: Reheating
+    name: Ventitaltion Reheating
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: switch_modbus_controller_2
   component_id: switch.modbus_controller
   fields:
@@ -473,7 +660,11 @@ featured_components:
     address: 4
     bitmask: 1
     id: switch_modbus_controller_2
-    name: Max duration for level 3-4 enable
+    name: Ventitaltion Max duration for level 3-4 enable
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: switch_modbus_controller_3
   component_id: switch.modbus_controller
   fields:
@@ -483,7 +674,11 @@ featured_components:
     address: 6
     bitmask: 1
     id: switch_modbus_controller_3
-    name: Humidity control
+    name: Ventitaltion Humidity control
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: switch_modbus_controller_4
   component_id: switch.modbus_controller
   fields:
@@ -494,7 +689,11 @@ featured_components:
     address: 15
     bitmask: 1
     id: switch_modbus_controller_4
-    name: Filter change autostop
+    name: Ventitaltion Filter change autostop
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: switch_modbus_controller_5
   component_id: switch.modbus_controller
   fields:
@@ -505,7 +704,11 @@ featured_components:
     address: 25
     bitmask: 1
     id: switch_modbus_controller_5
-    name: Device stop enable
+    name: Ventitaltion Device stop enable
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: switch_modbus_controller_6
   component_id: switch.modbus_controller
   fields:
@@ -516,7 +719,11 @@ featured_components:
     address: 45
     bitmask: 1
     id: switch_modbus_controller_6
-    name: Calendar mode
+    name: Ventitaltion Calendar mode
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 - id: switch_modbus_controller_7
   component_id: switch.modbus_controller
   fields:
@@ -526,10 +733,14 @@ featured_components:
     address: 47
     bitmask: 1
     id: switch_modbus_controller_7
-    name: Filter reset
+    name: Ventitaltion Filter reset
+  requires:
+  - modbus1
+  - mbus
+  - genvex_modbus
 source:
   type: esphome-devices
   remote_id: Genvex-Nibe-AlphaInnotec-heat-recovery-ventilation
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Genvex-Nibe-AlphaInnotec-heat-recovery-ventilation/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 182316d4b3fa783217495e74f5d22020ce3625b89090fe2b8205f403857d99a0

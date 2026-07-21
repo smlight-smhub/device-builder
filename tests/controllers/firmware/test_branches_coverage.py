@@ -14,7 +14,7 @@ Surfaces touched here:
   for an unknown job id, ``follow_jobs`` early-returns when
   ``client`` is None.
 - **Runner internals**: queue runner skips a CANCELLED job
-  without spawning a subprocess, ``_terminate_current_process``
+  without spawning a subprocess, ``_terminate_job_process``
   is a no-op when no process is bound.
 - **Command building**: ``_build_command`` for ``RENAME`` appends
   ``new_name`` as a positional arg.
@@ -38,6 +38,7 @@ from esphome_device_builder.helpers.api import CommandError
 from esphome_device_builder.models import (
     ErrorCode,
     FirmwareJob,
+    JobSource,
     JobStatus,
     JobType,
 )
@@ -251,24 +252,22 @@ async def test_run_queue_cancels_sibling_lane_when_one_raises(
     assert sibling_cancelled.is_set()
 
 
-async def test_terminate_current_process_no_op_when_no_process(
+async def test_terminate_job_process_no_op_when_no_process(
     firmware_controller_factory: FirmwareControllerFactory,
 ) -> None:
-    """``_terminate_current_process`` returns cleanly when no process is bound.
+    """``_terminate_job_process`` returns cleanly when no process is bound.
 
-    The cancel handler always calls ``_terminate_current_process``
+    The cancel handler always calls ``_terminate_job_process``
     after flipping the status — but the QUEUED-cancel path runs
-    before the runner has spawned anything, so the controller's
-    ``_current_process`` is still ``None``. Pin the early return
+    before the runner has spawned anything, so ``state.processes``
+    has no entry for the job. Pin the early return
     so a regression that fell through to ``terminate_subtree_*``
     against ``None`` would surface as a hard error here.
     """
     controller = firmware_controller_factory()
-    controller.state.compile_lane.current_process = None
-    controller.state.compile_lane.current_job = None
 
     # Should return without raising; no process to terminate.
-    await controller._terminate_current_process(controller.state.compile_lane)
+    await controller._terminate_job_process(MagicMock(job_id="no-proc"))
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +380,12 @@ async def test_upload_blocked_by_active_reset_or_same_config_clean(
     reset = _job("r", "", JobType.RESET_BUILD_ENV, status=JobStatus.RUNNING)
     controller.state.jobs[reset.job_id] = reset
     assert controller.state.upload_blocked(upload) is True
+    # A REMOTE-source reset wipes the receiver's tree, not any local
+    # artifact, so it must not gate local flashes.
+    reset.source = JobSource.REMOTE
+    assert controller.state.upload_blocked(upload) is False
+    reset.source = JobSource.LOCAL
+    assert controller.state.upload_blocked(upload) is True
     reset.status = JobStatus.COMPLETED  # terminal — no longer blocks
     assert controller.state.upload_blocked(upload) is False
 
@@ -389,6 +394,11 @@ async def test_upload_blocked_by_active_reset_or_same_config_clean(
     controller.state.jobs[same.job_id] = same
     controller.state.jobs[other.job_id] = other
     assert controller.state.upload_blocked(upload) is True  # same-config clean blocks
+    # A REMOTE-source clean (the per-peer fan-out) wipes the receiver's
+    # tree, not local artifacts — no gate; its LOCAL sibling still blocks.
+    same.source = JobSource.REMOTE
+    assert controller.state.upload_blocked(upload) is False
+    same.source = JobSource.LOCAL
     same.status = JobStatus.CANCELLED
     assert controller.state.upload_blocked(upload) is False  # only other-config clean left
     # A compile is never gated — compile-lane ops serialize behind the clean/reset.

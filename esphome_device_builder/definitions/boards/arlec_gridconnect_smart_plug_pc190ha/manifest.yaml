@@ -18,13 +18,13 @@ pins:
   occupied_by: blue_led
 - gpio: 12
   available: false
-  occupied_by: Power
+  occupied_by: Arlec Smart Plug Power
 - gpio: 13
   available: false
   occupied_by: red_led
 - gpio: 14
   available: false
-  occupied_by: Button
+  occupied_by: Arlec Smart Plug Button
 docs_url: https://devices.esphome.io/devices/Arlec-GridConnect-Smart-Plug-PC190HA/
 featured_components:
 - id: binary_sensor_gpio_1
@@ -39,7 +39,7 @@ featured_components:
         inverted: true
       locked: true
     id: binary_sensor_gpio_1
-    name: Button
+    name: Arlec Smart Plug Button
 - id: blue_led
   component_id: switch.gpio
   fields:
@@ -67,10 +67,10 @@ featured_components:
       value: 12
       locked: true
     id: relay
-    name: Power
+    name: Arlec Smart Plug Power
 source:
   type: esphome-devices
   remote_id: Arlec-GridConnect-Smart-Plug-PC190HA
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Arlec-GridConnect-Smart-Plug-PC190HA/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 30ca79595b88edcc40e3a8f2b162f96298d6da82117c543fa0c7c143fdcb45f0

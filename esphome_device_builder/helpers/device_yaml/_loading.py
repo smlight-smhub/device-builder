@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from esphome import const, yaml_util
+from esphome.components.packages import resolve_packages
 from esphome.const import CONF_PACKAGES
 from esphome.core import EsphomeError
 from esphome.storage_json import StorageJSON
@@ -29,38 +30,11 @@ from ._parsing import (
     extract_logger_baud_rate,
     extract_ota_partition_access,
     get_api_encryption_block,
+    has_top_level_block,
     parse_esphome_meta,
     yaml_has_api_encryption,
     yaml_has_top_level_block,
 )
-
-# Prefer the upstream single-call seam when present (the
-# ``resolve_packages`` proposal landing as esphome/esphome#16235).
-# Fall back to the two-step ``do_packages_pass`` + ``merge_packages``
-# that ESPHome's own ``validate_config`` pipeline strings together
-# today. Both imports are guarded by ``try/except ImportError``:
-# a future esphome that ships only ``resolve_packages`` (deprecating
-# or moving the two-step helpers) would otherwise break our module-
-# load. Once the dashboard's dep floor moves past the release that
-# shipped ``resolve_packages``, the entire fallback path can be
-# deleted in one commit.
-try:
-    from esphome.components.packages import (  # type: ignore[attr-defined]
-        resolve_packages as _resolve_packages,
-    )
-except ImportError:
-    _resolve_packages = None
-
-try:
-    from esphome.components.packages import (
-        do_packages_pass as _do_packages_pass,
-    )
-    from esphome.components.packages import (
-        merge_packages as _merge_packages,
-    )
-except ImportError:
-    _do_packages_pass = None  # type: ignore[assignment]
-    _merge_packages = None  # type: ignore[assignment]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -227,11 +201,7 @@ def load_device_from_storage(
     # 1. ``storage.core_platform`` — post-codegen ground truth
     #    written by upstream's ``StorageJSON.from_esphome_core``
     #    (esphome#9028, 2025.6+). Always the lowercase platform
-    #    key, never the chip variant. ``getattr`` with a default
-    #    keeps this working on older ``esphome`` installs where
-    #    ``StorageJSON`` doesn't carry the attribute at all —
-    #    pyproject's floor is ``esphome>=2024.1.0`` so the
-    #    pre-#9028 path is reachable.
+    #    key, never the chip variant.
     # 2. ``detect_platform_from_yaml`` — the YAML's top-level
     #    platform key, also lowercase. Picks up never-compiled
     #    devices and pre-2025.6 ``StorageJSON`` files that don't
@@ -247,10 +217,8 @@ def load_device_from_storage(
     # the call site, where the variant *is* the right level of
     # detail.
     target_platform = ""
-    if storage:
-        core_platform = getattr(storage, "core_platform", None)
-        if core_platform:
-            target_platform = core_platform.lower()
+    if storage and storage.core_platform:
+        target_platform = storage.core_platform.lower()
     if not target_platform:
         target_platform = detect_platform_from_yaml(yaml_content, resolved_config)
     target_platform = normalize_platform(target_platform)
@@ -351,11 +319,8 @@ def load_device_from_storage(
         # wins, raw-text fills in mid-edit, and we don't have a
         # ``loaded_integrations`` entry that maps cleanly to "uses
         # mqtt for dashboard discovery" the way ``"api"`` does.
-        uses_mqtt=(
-            config_has_top_level_block(resolved_config, "mqtt")
-            if resolved_config is not None
-            else yaml_has_top_level_block(yaml_content, "mqtt")
-        ),
+        uses_mqtt=has_top_level_block(resolved_config, yaml_content, "mqtt"),
+        uses_deep_sleep=has_top_level_block(resolved_config, yaml_content, "deep_sleep"),
         api_enabled=api_enabled,
         api_encrypted=api_encrypted,
         mac_address=mac_address,
@@ -439,13 +404,10 @@ def load_device_yaml(path: Path) -> dict | None:
 
     Resolves ``!secret`` / ``!include`` / etc. like a real compile,
     flattens any ``packages:`` block into the main config via
-    ESPHome's package-resolution internals (the single-call
-    ``resolve_packages`` on newer ESPHome, the two-step
-    ``do_packages_pass`` + ``merge_packages`` fallback on older
-    builds), so callers see what the compiler actually sees —
-    ``api:`` / ``wifi:`` / target-platform blocks contributed by
-    packages register as top-level keys here — and returns
-    ``None`` when the file isn't a mapping or fails to parse.
+    ESPHome's ``resolve_packages``, so callers see what the compiler
+    actually sees — ``api:`` / ``wifi:`` / target-platform blocks
+    contributed by packages register as top-level keys here — and
+    returns ``None`` when the file isn't a mapping or fails to parse.
 
     Package resolution is best-effort: a remote (git) package needs
     network access, an invalid package definition fails ESPHome's
@@ -468,16 +430,17 @@ def load_device_yaml(path: Path) -> dict | None:
         return None
     if not isinstance(config, dict):
         return None
-    # ``packages:`` is a separate pass in the ESPHome pipeline (see
-    # ``do_packages_pass`` + ``merge_packages`` in
-    # ``esphome.config.validate_config``): packages need to be loaded
-    # and merged so blocks they contribute (api / wifi / target-platform
-    # / …) become top-level keys. Without this step a config that
-    # puts those blocks behind ``packages:`` comes back from
-    # ``yaml_util.load_yaml`` with everything still nested under
-    # ``packages:``, and the dashboard's flag detection silently
-    # misses them. We delegate to ESPHome internals — the loader
-    # and merge algorithm live upstream.
+    # ``packages:`` is a separate pass in the ESPHome pipeline
+    # (``do_packages_pass`` + ``merge_packages`` in
+    # ``esphome.config.validate_config``, wrapped for external callers
+    # as ``esphome.components.packages.resolve_packages``): packages
+    # need to be loaded and merged so blocks they contribute
+    # (api / wifi / target-platform / …) become top-level keys. Without
+    # this step a config that puts those blocks behind ``packages:``
+    # comes back from ``yaml_util.load_yaml`` with everything still
+    # nested under ``packages:``, and the dashboard's flag detection
+    # silently misses them. We delegate to ESPHome internals — the
+    # loader and merge algorithm live upstream.
     #
     # This resolves offline: the dashboard sets ``CORE.skip_external_update`` at
     # startup (``DashboardSettings.parse_args``), so esphome's git layer treats
@@ -487,11 +450,7 @@ def load_device_yaml(path: Path) -> dict | None:
     # real builds refresh via the esphome CLI's own resolve.
     if isinstance(config.get(CONF_PACKAGES), (dict, list)):
         try:
-            if _resolve_packages is not None:
-                config = _resolve_packages(config)
-            elif _do_packages_pass is not None and _merge_packages is not None:
-                config = _do_packages_pass(config)
-                config = _merge_packages(config)
+            config = resolve_packages(config)
         except Exception:
             # Best-effort: a bad / unreachable package shouldn't
             # blank the device's metadata. Keep the unmerged shape
@@ -503,8 +462,8 @@ def load_device_yaml(path: Path) -> dict | None:
                 exc_info=True,
             )
     # ``config`` came from ``yaml_util.load_yaml`` (esphome,
-    # untyped) and was further passed through the package-merge
-    # helpers (also untyped), so it stays ``Any`` despite the
+    # untyped) and was further passed through ``resolve_packages``
+    # (also untyped), so it stays ``Any`` despite the
     # ``isinstance(config, dict)`` narrowing earlier. Cast at the
     # return so the public ``dict | None`` signature is honest
     # without forcing every caller to re-narrow on receive.

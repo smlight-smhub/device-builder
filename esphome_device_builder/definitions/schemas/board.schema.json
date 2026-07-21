@@ -112,6 +112,10 @@
         "$ref": "#/$defs/pin"
       }
     },
+    "pins_from": {
+      "type": "string",
+      "description": "Board id whose pin table this board inherits at sync; mutually exclusive with pins."
+    },
     "docs_url": {
       "type": "string",
       "description": "Link to ESPHome documentation for this platform.",
@@ -131,6 +135,18 @@
       "type": "boolean",
       "description": "True for generic fallback boards where not all pins may be physically accessible.",
       "default": false
+    },
+    "full_config": {
+      "type": "boolean",
+      "description": "Override for whether the featured components form a complete onboard config. Absent, imports (a source block) default true and hand-curated boards false."
+    },
+    "package_import_url": {
+      "type": "string",
+      "description": "Remote package shorthand (github://owner/repo/file.yaml@ref). When set, devices/create generates a minimal YAML referencing this upstream config through packages: instead of expanding component defaults."
+    },
+    "package_name": {
+      "type": "string",
+      "description": "The packages: mapping key used with package_import_url (e.g. esphome.bluetooth-proxy); the board id when omitted."
     },
     "featured_components": {
       "type": "array",
@@ -156,7 +172,7 @@
         "type": {
           "type": "string",
           "description": "Origin marker. Drives which sync script owns this manifest.",
-          "enum": ["esphome-devices"]
+          "enum": ["esphome-devices", "bluetooth-proxies"]
         },
         "remote_id": {
           "type": "string",

@@ -19,12 +19,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, Literal
 
 import aiohttp
 from yarl import URL
+from zeroconf import RecordUpdateListener, Zeroconf
+from zeroconf.const import _TYPE_A, _TYPE_AAAA
 
 from ....helpers import json as _json
 from ....helpers.async_ import drain_tasks
@@ -39,6 +42,7 @@ from ....models import (
     IntentResponse,
     PeerLinkIntent,
     RejectReason,
+    ResetBuildEnvAckFrameData,
     SubmitJobAckFrameData,
 )
 from .._client_models import (
@@ -60,7 +64,10 @@ from .one_shot import (
     _DEFAULT_TIMEOUT_SECONDS,
     _drive_initiator_handshake_and_read_response,
     _extract_auto_provision_supported,
+    _extract_ha_addon,
     _extract_receiver_esphome_version,
+    _extract_receiver_friendly_name,
+    _extract_reset_build_env_supported,
 )
 
 if TYPE_CHECKING:
@@ -124,6 +131,32 @@ _LOCAL_CLOSE_RECEIVER_REJECTED = "receiver_rejected"
 _LOCAL_CLOSE_PIN_MISMATCH = "pin_mismatch"
 
 
+def _mdns_record_name(hostname: str) -> str | None:
+    """Return the lowercase trailing-dot record name, or ``None`` for an IP."""
+    bare = hostname.rstrip(".")
+    with contextlib.suppress(ValueError):
+        ipaddress.ip_address(bare)
+        return None
+    return f"{bare.lower()}."
+
+
+class _ReceiverWakeListener(RecordUpdateListener):
+    """One-shot wake on an A/AAAA record for the receiver's hostname."""
+
+    def __init__(self, record_name: str, wake: asyncio.Event) -> None:
+        self._record_name = record_name
+        self._wake = wake
+
+    def async_update_records(self, zc: Zeroconf, now: float, records: list[Any]) -> None:
+        if self._wake.is_set():
+            return
+        for update in records:
+            new = update.new
+            if new.type in (_TYPE_A, _TYPE_AAAA) and new.name.lower() == self._record_name:
+                self._wake.set()
+                return
+
+
 class PeerLinkClient:
     """
     Long-lived offloader-side peer-link Noise WS session.
@@ -155,8 +188,21 @@ class PeerLinkClient:
         receiver_label: str,
         bus: EventBus,
         resolver: AbstractResolver | None = None,
+        get_zeroconf: Callable[[], Zeroconf | None] | None = None,
+        get_display_identity: Callable[[], tuple[str, bool]] | None = None,
     ) -> None:
         self._hostname = receiver_hostname
+        # Lazy reader for this offloader's own ``(friendly_name,
+        # ha_addon)`` — sent in the session msg3 so the receiver
+        # can show a human name; lazy because the advertiser may
+        # come up after the client spawns.
+        self._get_display_identity = get_display_identity
+        # mDNS fast-reconnect inputs: the shared zeroconf (``None``
+        # getter or return skips the optimisation) and the A/AAAA
+        # record name that signals the receiver came back (``None``
+        # for an IP endpoint — nothing to match).
+        self._get_zeroconf = get_zeroconf
+        self._wake_record_name = _mdns_record_name(receiver_hostname)
         self._port = receiver_port
         self._identity_priv = identity_priv
         self._identity_pub = public_bytes_for_priv(identity_priv)
@@ -203,20 +249,22 @@ class PeerLinkClient:
         # (controller's WS submit handler), same event loop — no
         # lock needed.
         self._active_channel: PeerLinkChannel | None = None
-        # Per-job ack futures populated by :meth:`submit_job`
-        # before the header goes out, drained by the receive
-        # loop's submit_job_ack dispatch, force-completed with
-        # :class:`SubmitJobSessionLostError` in
-        # :meth:`_run_session_loops`'s ``finally`` on session
-        # loss so callers don't hang on the ack timeout.
+        # Per-job ack futures populated by :meth:`submit_job` before
+        # the header goes out, drained by the receive loop's
+        # submit_job_ack dispatch, force-completed by
+        # :meth:`_drain_pending` on session loss so callers don't
+        # hang on the ack timeout.
         self._submit_job_acks: dict[str, asyncio.Future[SubmitJobAckFrameData]] = {}
+        # Per-mirror-job reset_build_env ack futures — same
+        # register / dispatch / drain lifecycle as ``_submit_job_acks``.
+        self._reset_env_acks: dict[str, asyncio.Future[ResetBuildEnvAckFrameData]] = {}
         # Operator-facing "Last connection error" line. Populated
         # by :meth:`_run_one_session`'s exception paths, cleared
         # on every successful session-open so a stale message
         # doesn't survive a reconnect.
         self._last_connect_error: str = ""
-        # Per-job in-flight download state — same drain shape as
-        # ``_submit_job_acks`` (force-completed on session loss).
+        # Per-job in-flight download state — same register / drain
+        # lifecycle as ``_submit_job_acks``, plus assembler state.
         self._artifacts_downloads: dict[str, _DownloadArtifactsState] = {}
 
     @property
@@ -281,7 +329,7 @@ class PeerLinkClient:
         *,
         job_id: str,
         configuration_filename: str,
-        target: Literal["compile", "upload", "clean"],
+        target: Literal["compile", "clean"],
         bundle_bytes: bytes,
         device_name: str = "",
         device_friendly_name: str = "",
@@ -300,6 +348,10 @@ class PeerLinkClient:
 
     async def cancel_job(self, *, job_id: str) -> bool:
         return await _submit.cancel_job(self, job_id=job_id)
+
+    async def reset_build_env(self, *, job_id: str) -> ResetBuildEnvAckFrameData:
+        """Ask the receiver to enqueue its full build-env reset, tagged *job_id*."""
+        return await _submit.reset_build_env(self, job_id=job_id)
 
     async def download_artifacts(self, *, job_id: str) -> DownloadArtifactsResult:
         return await _submit.download_artifacts(self, job_id=job_id)
@@ -349,7 +401,7 @@ class PeerLinkClient:
                     backoff = _RECONNECT_INITIAL_BACKOFF_SECONDS
                 else:
                     backoff = min(backoff * 2, _RECONNECT_MAX_BACKOFF_SECONDS)
-                await asyncio.sleep(backoff)
+                await self._wait_reconnect(backoff)
         except asyncio.CancelledError:
             # ``_run_one_session`` already sent the structured
             # ``terminate`` frame in its own CancelledError handler
@@ -359,6 +411,31 @@ class PeerLinkClient:
             # OPENED first.
             self._fire_closed(_LOCAL_CLOSE_CLIENT_STOPPED)
             raise
+
+    async def _wait_reconnect(self, backoff: float) -> None:
+        """Sleep *backoff*, waking early on an mDNS record for the receiver.
+
+        Fail-soft: without a zeroconf instance, or for an IP endpoint,
+        this is a plain sleep.
+        """
+        zc = self._get_zeroconf() if self._get_zeroconf is not None else None
+        if zc is None or self._wake_record_name is None:
+            await asyncio.sleep(backoff)
+            return
+        wake = asyncio.Event()
+        listener = _ReceiverWakeListener(self._wake_record_name, wake)
+        zc.async_add_listener(listener, None)
+        try:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(wake.wait(), backoff)
+                _LOGGER.debug(
+                    "peer-link client to %s:%d: mDNS record for %s seen; reconnecting now",
+                    self._hostname,
+                    self._port,
+                    self._wake_record_name,
+                )
+        finally:
+            zc.async_remove_listener(listener)
 
     async def _run_one_session(self) -> str:
         """
@@ -391,7 +468,18 @@ class PeerLinkClient:
                     peer,
                 )
                 session = PeerLinkNoiseSession.initiator(self._identity_priv)
-                msg3_payload = _json.dumps({"dashboard_id": self._dashboard_id})
+                own_friendly, own_ha_addon = (
+                    self._get_display_identity()
+                    if self._get_display_identity is not None
+                    else ("", False)
+                )
+                msg3_payload = _json.dumps(
+                    {
+                        "dashboard_id": self._dashboard_id,
+                        "friendly_name": own_friendly,
+                        "ha_addon": own_ha_addon,
+                    }
+                )
                 response_ct = await _drive_initiator_handshake_and_read_response(
                     ws=ws,
                     sess=session,
@@ -442,6 +530,9 @@ class PeerLinkClient:
                     return self._on_handshake_rejected(response)
                 receiver_version = _extract_receiver_esphome_version(response)
                 auto_provision = _extract_auto_provision_supported(response)
+                receiver_friendly_name = _extract_receiver_friendly_name(response)
+                receiver_ha_addon = _extract_ha_addon(response)
+                reset_supported = _extract_reset_build_env_supported(response)
                 channel = PeerLinkChannel(
                     noise=session, ws=ws, log_label=f"{self._hostname}:{self._port}"
                 )
@@ -450,6 +541,9 @@ class PeerLinkClient:
                 self._fire_opened(
                     esphome_version=receiver_version,
                     auto_provision_supported=auto_provision,
+                    friendly_name=receiver_friendly_name,
+                    ha_addon=receiver_ha_addon,
+                    reset_build_env_supported=reset_supported,
                 )
                 try:
                     return await self._run_session_loops(channel)
@@ -483,7 +577,7 @@ class PeerLinkClient:
             self._last_connect_error = f"{type(exc).__name__}: {exc}"
             return _LOCAL_CLOSE_TRANSPORT_ERROR
 
-    async def _run_session_loops(self, channel: PeerLinkChannel) -> str:  # noqa: C901
+    async def _run_session_loops(self, channel: PeerLinkChannel) -> str:
         """
         Run the receive loop with a heartbeat task in parallel.
 
@@ -571,31 +665,39 @@ class PeerLinkClient:
             return state.close_reason
         finally:
             self._active_channel = None
-            # Drain in-flight submitters so they raise
+            # Drain in-flight requesters so they raise
             # :class:`SubmitJobSessionLostError` immediately
-            # instead of waiting on the per-flow timeout. Snapshot
-            # the dict before iterating — :meth:`submit_job`'s
-            # ``finally`` pops the entry as soon as the future fires.
-            for pending_job_id, pending_fut in list(self._submit_job_acks.items()):
-                if not pending_fut.done():
-                    pending_fut.set_exception(
-                        SubmitJobSessionLostError(
-                            f"submit_job: peer-link session to "
-                            f"{self._hostname}:{self._port} ended before ack "
-                            f"for job_id={pending_job_id!r}"
-                        )
-                    )
-            # Same drain shape for in-flight artifact downloads.
-            for pending_job_id, dl_state in list(self._artifacts_downloads.items()):
-                if not dl_state.future.done():
-                    dl_state.future.set_exception(
-                        SubmitJobSessionLostError(
-                            f"download_artifacts: peer-link session to "
-                            f"{self._hostname}:{self._port} ended before "
-                            f"artifacts_end for job_id={pending_job_id!r}"
-                        )
-                    )
+            # instead of waiting on the per-flow timeout.
+            self._drain_pending(self._submit_job_acks.items(), label="submit_job")
+            self._drain_pending(self._reset_env_acks.items(), label="reset_build_env")
+            self._drain_pending(
+                ((job_id, dl.future) for job_id, dl in self._artifacts_downloads.items()),
+                label="download_artifacts",
+                awaiting="artifacts_end",
+            )
             await drain_tasks((heartbeat_task,))
+
+    def _drain_pending(
+        self,
+        pending: Iterable[tuple[str, asyncio.Future[Any]]],
+        *,
+        label: str,
+        awaiting: str = "ack",
+    ) -> None:
+        """Fail every undone future in *pending* with a session-lost error.
+
+        Snapshot before iterating — each requester's ``finally`` pops its
+        entry as soon as the future fires.
+        """
+        for pending_job_id, pending_fut in list(pending):
+            if not pending_fut.done():
+                pending_fut.set_exception(
+                    SubmitJobSessionLostError(
+                        f"{label}: peer-link session to "
+                        f"{self._hostname}:{self._port} ended before {awaiting} "
+                        f"for job_id={pending_job_id!r}"
+                    )
+                )
 
     def _build_sync_frame_dispatch(
         self,
@@ -611,6 +713,7 @@ class PeerLinkClient:
         return {
             AppMessageType.QUEUE_STATUS.value: self._dispatch_queue_status,
             AppMessageType.SUBMIT_JOB_ACK.value: self._dispatch_submit_job_ack,
+            AppMessageType.RESET_BUILD_ENV_ACK.value: self._dispatch_reset_build_env_ack,
             AppMessageType.JOB_STATE_CHANGED.value: self._dispatch_job_state_changed,
             AppMessageType.JOB_OUTPUT.value: self._dispatch_job_output,
             AppMessageType.ARTIFACTS_START.value: self._dispatch_artifacts_start,
@@ -623,6 +726,9 @@ class PeerLinkClient:
 
     def _dispatch_submit_job_ack(self, parsed: dict[str, Any]) -> None:
         _dispatch.dispatch_submit_job_ack(self, parsed)
+
+    def _dispatch_reset_build_env_ack(self, parsed: dict[str, Any]) -> None:
+        _dispatch.dispatch_reset_build_env_ack(self, parsed)
 
     def _log_malformed(self, frame_type: str, parsed: dict[str, Any]) -> None:
         _dispatch.log_malformed(self, frame_type, parsed)
@@ -643,12 +749,21 @@ class PeerLinkClient:
         _dispatch.dispatch_artifacts_end(self, parsed)
 
     def _fire_opened(
-        self, *, esphome_version: str = "", auto_provision_supported: bool = False
+        self,
+        *,
+        esphome_version: str = "",
+        auto_provision_supported: bool = False,
+        friendly_name: str = "",
+        ha_addon: bool = False,
+        reset_build_env_supported: bool = False,
     ) -> None:
         _dispatch.fire_opened(
             self,
             esphome_version=esphome_version,
             auto_provision_supported=auto_provision_supported,
+            friendly_name=friendly_name,
+            ha_addon=ha_addon,
+            reset_build_env_supported=reset_build_env_supported,
         )
 
     def _fire_closed(self, reason: str, *, error_detail: str = "") -> None:

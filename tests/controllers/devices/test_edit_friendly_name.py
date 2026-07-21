@@ -19,7 +19,7 @@ What we pin:
 
 from __future__ import annotations
 
-import shutil
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -27,9 +27,10 @@ import pytest
 
 from esphome_device_builder.controllers._device_scanner import DeviceFileMetadata, DeviceScanner
 from esphome_device_builder.helpers.api import CommandError
+from esphome_device_builder.helpers.device_yaml import EsphomeMeta
 from esphome_device_builder.models import ErrorCode
 
-from .conftest import MakeControllerFactory
+from .conftest import MakeControllerFactory, wifi_ap_block
 
 SOURCE_YAML = """\
 esphome:
@@ -126,6 +127,46 @@ async def test_edit_friendly_name_redirects_through_substitution(
     assert "  friendly_name: Pump Watcher\n" in new_yaml
     assert "  friendly_name: ${friendly_name}\n" in new_yaml
     assert "AC Float Monitor" not in new_yaml
+
+
+async def test_edit_friendly_name_retargets_generated_fallback_ap_ssid(
+    tmp_path: Path,
+    make_controller: MakeControllerFactory,
+) -> None:
+    """The generated fallback-AP ssid follows the friendly-name edit."""
+    ctrl = make_controller(tmp_path, with_state_monitor=True)
+    yaml_text = SOURCE_YAML + "\n" + wifi_ap_block("Kitchen Lamp Fallback Hotspot")
+    (tmp_path / "kitchen.yaml").write_text(yaml_text, "utf-8")
+
+    await ctrl.edit_friendly_name(
+        configuration="kitchen.yaml",
+        new_friendly_name="Reading Lamp",
+    )
+
+    new_yaml = (tmp_path / "kitchen.yaml").read_text("utf-8")
+    assert "    ssid: Reading Lamp Fallback Hotspot\n" in new_yaml
+    assert "Kitchen Lamp Fallback Hotspot" not in new_yaml
+
+
+async def test_edit_friendly_name_retargets_name_labelled_ap_ssid_on_insert(
+    tmp_path: Path,
+    make_controller: MakeControllerFactory,
+) -> None:
+    """Inserting a first friendly name retargets an ssid derived from the device name."""
+    ctrl = make_controller(tmp_path, with_state_monitor=True)
+    yaml_text = "esphome:\n  name: kitchen\n\nesp32:\n  variant: ESP32\n\n" + wifi_ap_block(
+        "kitchen Fallback Hotspot"
+    )
+    (tmp_path / "kitchen.yaml").write_text(yaml_text, "utf-8")
+
+    await ctrl.edit_friendly_name(
+        configuration="kitchen.yaml",
+        new_friendly_name="Reading Lamp",
+    )
+
+    new_yaml = (tmp_path / "kitchen.yaml").read_text("utf-8")
+    assert "  friendly_name: Reading Lamp\n" in new_yaml
+    assert "    ssid: Reading Lamp Fallback Hotspot\n" in new_yaml
 
 
 async def test_edit_friendly_name_safely_quotes_yaml_specials(
@@ -638,7 +679,7 @@ async def test_edit_friendly_name_raises_internal_error_on_round_trip_mismatch(
 
     monkeypatch.setattr(
         "esphome_device_builder.controllers.devices.mutations_simple.parse_esphome_meta",
-        lambda _content: (None, None, None, None),
+        lambda _content: EsphomeMeta(None, None, None, None),
     )
 
     with pytest.raises(CommandError) as excinfo:
@@ -661,38 +702,21 @@ async def test_edit_friendly_name_routes_through_atomic_write_helper(
 ) -> None:
     """Source YAML survives a mid-write crash inside the atomic helper.
 
-    The controller writes through ``esphome.helpers.write_file``,
-    which stages the new bytes in a sibling tempfile and then
-    ``shutil.move`` s into place. ``Path.write_text`` would
-    truncate the destination first, so a crash mid-write would
-    leave a partial / corrupt YAML. Pin that the controller uses
-    the atomic helper by patching ``shutil.move`` to raise during
-    the rename — the destination must come back unchanged and no
-    tempfile shrapnel can be left behind.
-
-    Patches at ``shutil.move`` rather than ``os.replace`` because
-    that's the exact entry point ``esphome.helpers.write_file``
-    routes through; a regression that swapped back to a
-    non-atomic path would skip ``shutil.move`` entirely and we'd
-    catch it as "the patched move was never called and the file
-    got modified anyway."
+    ``os.replace`` is patched to raise mid-rename: the destination must
+    come back unchanged, with no tempfile shrapnel, and the patched
+    replace must have been called (a non-atomic path would skip it).
     """
     ctrl = make_controller(tmp_path, with_state_monitor=True)
     (tmp_path / "kitchen.yaml").write_text(SOURCE_YAML, "utf-8")
 
     boom = RuntimeError("simulated mid-rename crash")
-    move_calls: list[tuple[str, str]] = []
+    replace_calls: list[tuple[str, str]] = []
 
-    def _exploding_move(src: str, dst: str) -> None:
-        move_calls.append((str(src), str(dst)))
-        # Mirror the cleanup the real ``shutil.move`` would have
-        # done if the rename had succeeded so the regression test
-        # observes "no leftover tempfile" via the helper's own
-        # finally-clause cleanup, not via the move itself.
-        Path(src).unlink(missing_ok=True)
+    def _exploding_replace(src: str, dst: str) -> None:
+        replace_calls.append((str(src), str(dst)))
         raise boom
 
-    monkeypatch.setattr(shutil, "move", _exploding_move)
+    monkeypatch.setattr(os, "replace", _exploding_replace)
     with pytest.raises(RuntimeError, match="simulated mid-rename"):
         await ctrl.edit_friendly_name(
             configuration="kitchen.yaml", new_friendly_name="Reading Lamp"
@@ -700,12 +724,12 @@ async def test_edit_friendly_name_routes_through_atomic_write_helper(
 
     # Source untouched — atomic-write contract held.
     assert (tmp_path / "kitchen.yaml").read_text("utf-8") == SOURCE_YAML
-    # No leftover tempfile siblings (write_file's finally cleans up).
+    # No leftover tempfile siblings (atomic_write's finally cleans up).
     leftover = [p.name for p in tmp_path.iterdir() if p.name != "kitchen.yaml"]
     assert leftover == []
     # Pin the helper got invoked — a regression that switched back
-    # to ``Path.write_text`` would skip ``shutil.move`` entirely.
-    assert len(move_calls) == 1
+    # to ``Path.write_text`` would skip ``os.replace`` entirely.
+    assert len(replace_calls) == 1
     _ = boom  # silence the unused-name complaint without a noqa
 
 

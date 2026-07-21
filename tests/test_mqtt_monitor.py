@@ -11,8 +11,8 @@ Covers the parts that don't require a live broker:
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 from unittest.mock import patch
@@ -36,7 +36,10 @@ from esphome_device_builder.controllers._device_mqtt_monitor import (
 )
 from esphome_device_builder.controllers._device_state_monitor import DeviceStateMonitor
 from esphome_device_builder.helpers.device_yaml import device_uses_mqtt
+from esphome_device_builder.helpers.subscriber_presence import SubscriberPresence
 from esphome_device_builder.models import Device, DeviceState
+
+from .conftest import running_task
 
 # ---------------------------------------------------------------------------
 # YAML detection
@@ -189,9 +192,16 @@ class _RecordingMonitor:
 
     def __init__(self, broker: MqttBrokerConfig, *_args: object, **_kwargs: object) -> None:
         self.broker = broker
+        self.presence = _kwargs.get("presence")
+        self.on_connection_change = _kwargs.get("on_connection_change")
+        self.is_publisher = True
+        self.connected = False
         self.started = False
         self.stopped = False
         self.__class__.instances.append(self)
+
+    def set_publisher(self, *, value: bool) -> None:
+        self.is_publisher = value
 
     @staticmethod
     def is_available() -> bool:
@@ -231,12 +241,17 @@ def _write_device(config_dir: Path, name: str, mqtt_yaml: str | None) -> Device:
     )
 
 
-def _make_coordinator(config_dir: Path, devices: list[Device]) -> DeviceMqttCoordinator:
+def _make_coordinator(
+    config_dir: Path,
+    devices: list[Device],
+    presence: SubscriberPresence | None = None,
+) -> DeviceMqttCoordinator:
     return DeviceMqttCoordinator(
         config_dir=config_dir,
         get_devices=lambda: devices,
         on_state_change=lambda *_args: None,
         on_ip_change=lambda *_args: None,
+        presence=presence,
     )
 
 
@@ -288,6 +303,104 @@ async def test_coordinator_starts_a_session_per_login_on_one_broker(
     assert coord.active_brokers == 2
     warnings = [r for r in caplog.records if r.name == target and r.levelname == "WARNING"]
     assert warnings == []
+
+
+async def test_coordinator_designates_one_publisher_per_broker(
+    tmp_path: Path,
+    stub_monitor: type[_RecordingMonitor],
+) -> None:
+    """Two logins on one broker → one broadcaster; distinct brokers each broadcast."""
+    devices = [
+        _write_device(
+            tmp_path, "alpha", "mqtt:\n  broker: 192.168.0.1\n  username: alpha\n  password: a\n"
+        ),
+        _write_device(
+            tmp_path, "beta", "mqtt:\n  broker: 192.168.0.1\n  username: beta\n  password: b\n"
+        ),
+        _write_device(tmp_path, "gamma", "mqtt:\n  broker: 192.168.0.2\n"),
+    ]
+    coord = _make_coordinator(tmp_path, devices)
+    await coord.reconcile()
+    assert coord.active_brokers == 3
+    by_login = {(m.broker.host, m.broker.username): m for m in stub_monitor.instances}
+    assert by_login[("192.168.0.1", "alpha")].is_publisher is True
+    assert by_login[("192.168.0.1", "beta")].is_publisher is False
+    assert by_login[("192.168.0.2", None)].is_publisher is True
+
+
+async def test_coordinator_promotes_publisher_when_broadcaster_drops(
+    tmp_path: Path,
+    stub_monitor: type[_RecordingMonitor],
+) -> None:
+    """Losing the designated broadcaster promotes a surviving same-broker login."""
+    alpha = _write_device(
+        tmp_path, "alpha", "mqtt:\n  broker: 192.168.0.1\n  username: alpha\n  password: a\n"
+    )
+    beta = _write_device(
+        tmp_path, "beta", "mqtt:\n  broker: 192.168.0.1\n  username: beta\n  password: b\n"
+    )
+    devices = [alpha, beta]
+    coord = _make_coordinator(tmp_path, devices)
+    await coord.reconcile()
+
+    devices.remove(alpha)
+    (tmp_path / "alpha.yaml").unlink()
+    await coord.reconcile()
+
+    survivors = [m for m in stub_monitor.instances if not m.stopped]
+    assert [(m.broker.username, m.is_publisher) for m in survivors] == [("beta", True)]
+
+
+async def test_election_prefers_connected_login_over_down_incumbent(
+    tmp_path: Path,
+    stub_monitor: type[_RecordingMonitor],
+) -> None:
+    """A login stuck in reconnect loses the broadcaster role to a healthy sibling."""
+    devices = [
+        _write_device(
+            tmp_path, "alpha", "mqtt:\n  broker: 192.168.0.1\n  username: alpha\n  password: a\n"
+        ),
+        _write_device(
+            tmp_path, "beta", "mqtt:\n  broker: 192.168.0.1\n  username: beta\n  password: b\n"
+        ),
+    ]
+    coord = _make_coordinator(tmp_path, devices)
+    await coord.reconcile()
+    by_user = {m.broker.username: m for m in stub_monitor.instances}
+    assert by_user["alpha"].is_publisher is True
+
+    # beta's session connects; alpha never does. The connection-change
+    # callback (wired to _assign_publishers) must hand beta the role.
+    beta_cb = by_user["beta"].on_connection_change
+    assert beta_cb is not None
+    by_user["beta"].connected = True
+    beta_cb()
+    assert by_user["beta"].is_publisher is True
+    assert by_user["alpha"].is_publisher is False
+
+    # alpha coming up later must NOT steal the role back — the healthy
+    # incumbent is sticky, so the broadcaster doesn't churn.
+    by_user["alpha"].connected = True
+    by_user["alpha"].on_connection_change()
+    assert by_user["beta"].is_publisher is True
+    assert by_user["alpha"].is_publisher is False
+
+    # beta dropping hands the role to the connected alpha.
+    by_user["beta"].connected = False
+    beta_cb()
+    assert by_user["alpha"].is_publisher is True
+    assert by_user["beta"].is_publisher is False
+
+
+async def test_coordinator_passes_presence_to_monitors(
+    tmp_path: Path,
+    stub_monitor: type[_RecordingMonitor],
+) -> None:
+    devices = [_write_device(tmp_path, "alpha", "mqtt:\n  broker: 192.168.0.1\n")]
+    presence = SubscriberPresence()
+    coord = _make_coordinator(tmp_path, devices, presence=presence)
+    await coord.reconcile()
+    assert [m.presence for m in stub_monitor.instances] == [presence]
 
 
 async def test_coordinator_warns_once_on_same_login_different_password(
@@ -973,13 +1086,8 @@ async def test_listen_drops_retained_discover_messages() -> None:
     await queue.put(_RetainedMessage())
     await queue.put(_FreshMessage())
 
-    listen_task = asyncio.create_task(monitor._listen(queue))
-    try:
+    async with running_task(monitor._listen(queue)):
         await asyncio.wait_for(fresh_seen.wait(), timeout=1.0)
-    finally:
-        listen_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await listen_task
 
     # Only the fresh message produced a callback — the retained one was dropped.
     assert state_calls == [("kitchen", DeviceState.ONLINE)]
@@ -1021,13 +1129,8 @@ async def test_listen_skips_empty_payload() -> None:
     await queue.put(_EmptyPayloadMessage())
     await queue.put(_FreshMessage())
 
-    listen_task = asyncio.create_task(monitor._listen(queue))
-    try:
+    async with running_task(monitor._listen(queue)):
         await asyncio.wait_for(fresh_seen.wait(), timeout=1.0)
-    finally:
-        listen_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await listen_task
 
     assert state_calls == [("kitchen", DeviceState.ONLINE)]
 
@@ -1067,13 +1170,8 @@ async def test_listen_drops_non_json_payload(caplog: pytest.LogCaptureFixture) -
     await queue.put(_FreshMessage())
 
     with caplog.at_level("DEBUG", logger="esphome_device_builder.controllers._device_mqtt_monitor"):
-        listen_task = asyncio.create_task(monitor._listen(queue))
-        try:
+        async with running_task(monitor._listen(queue)):
             await asyncio.wait_for(fresh_seen.wait(), timeout=1.0)
-        finally:
-            listen_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await listen_task
 
     assert state_calls == [("kitchen", DeviceState.ONLINE)]
     # Pin the log emission too — without this, a regression that
@@ -1133,13 +1231,8 @@ async def test_listen_skips_payload_with_missing_or_invalid_name() -> None:
     await queue.put(_NumericNameMessage())
     await queue.put(_FreshMessage())
 
-    listen_task = asyncio.create_task(monitor._listen(queue))
-    try:
+    async with running_task(monitor._listen(queue)):
         await asyncio.wait_for(fresh_seen.wait(), timeout=1.0)
-    finally:
-        listen_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await listen_task
 
     # Only the well-formed message fired the callback.
     assert state_calls == [("kitchen", DeviceState.ONLINE)]
@@ -1169,13 +1262,8 @@ async def test_listen_processes_fresh_discover_messages() -> None:
     queue: asyncio.Queue = asyncio.Queue()
     await queue.put(_FreshMessage())
 
-    listen_task = asyncio.create_task(monitor._listen(queue))
-    try:
+    async with running_task(monitor._listen(queue)):
         await asyncio.wait_for(seen.wait(), timeout=1.0)
-    finally:
-        listen_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await listen_task
 
     assert state_calls == [("kitchen", DeviceState.ONLINE)]
     assert ip_calls == [("kitchen", "10.0.0.5")]
@@ -1232,13 +1320,9 @@ async def test_running_reflects_task_state() -> None:
     # Stand-in for the listener task — never resolves so the
     # monitor stays in the "running" state until we cancel it.
     parked = asyncio.Event()
-    monitor._task = asyncio.create_task(parked.wait())
-    try:
+    async with running_task(parked.wait()) as task:
+        monitor._task = task
         assert monitor.running is True
-    finally:
-        monitor._task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await monitor._task
 
     # A done task no longer counts as running.
     assert monitor.running is False
@@ -1282,15 +1366,10 @@ async def test_start_is_idempotent_when_already_running() -> None:
         on_ip_change=lambda *_: None,
     )
     parked = asyncio.Event()
-    monitor._task = asyncio.create_task(parked.wait())
-    original_task = monitor._task
-    try:
+    async with running_task(parked.wait()) as task:
+        monitor._task = task
         await monitor.start()
-        assert monitor._task is original_task  # no replacement
-    finally:
-        monitor._task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await monitor._task
+        assert monitor._task is task  # no replacement
 
 
 async def test_stop_cancels_task_and_clears_last_seen() -> None:
@@ -1366,28 +1445,15 @@ async def test_ping_loop_marks_stale_devices_offline_and_republishes(
         on_state_change=on_state,
         on_ip_change=lambda *_: None,
     )
-
-    class _FakeClient:
-        def __init__(self) -> None:
-            self.publishes: list[tuple[str, Any, bool]] = []
-
-        def publish(self, topic: str, payload: Any = None, retain: bool = False) -> None:
-            self.publishes.append((topic, payload, retain))
-
-    fake = _FakeClient()
+    fake = _CountingClient()
 
     # Seed a stale entry that's already past the (patched) offline
     # timeout. The first tick should sweep it.
     loop = asyncio.get_running_loop()
     monitor._last_seen["ghost"] = loop.time() - 1.0
 
-    ping_task = asyncio.create_task(monitor._ping_loop(fake))
-    try:
+    async with running_task(monitor._ping_loop(fake)):
         await asyncio.wait_for(offline_seen.wait(), timeout=2.0)
-    finally:
-        ping_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await ping_task
 
     assert ("ghost", DeviceState.OFFLINE) in state_calls
     assert "ghost" not in monitor._last_seen
@@ -1396,6 +1462,250 @@ async def test_ping_loop_marks_stale_devices_offline_and_republishes(
     topic, _payload, retain = fake.publishes[0]
     assert topic == "esphome/discover"
     assert retain is False
+
+
+class _PublishInfo:
+    rc = 0
+
+
+class _CountingClient:
+    def __init__(self) -> None:
+        self.publishes: list[tuple[str, Any, bool]] = []
+
+    def publish(self, topic: str, payload: Any = None, retain: bool = False) -> _PublishInfo:
+        self.publishes.append((topic, payload, retain))
+        return _PublishInfo()
+
+
+async def test_ping_loop_idle_publishes_nothing_and_freezes_aging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no dashboard subscriber the loop parks: no broadcasts, no OFFLINE flips."""
+    monkeypatch.setattr(monitor_module, "_PING_INTERVAL", 0.05)
+    monkeypatch.setattr(monitor_module, "_OFFLINE_TIMEOUT", 0.1)
+
+    state_calls: list[tuple[str, DeviceState]] = []
+    presence = SubscriberPresence()
+    monitor = DeviceMqttMonitor(
+        broker=MqttBrokerConfig(host="x"),
+        on_state_change=lambda n, s: state_calls.append((n, s)),
+        on_ip_change=lambda *_: None,
+        presence=presence,
+    )
+    fake = _CountingClient()
+
+    loop = asyncio.get_running_loop()
+    monitor._last_seen["ghost"] = loop.time() - 1.0
+
+    async with running_task(monitor._ping_loop(fake)):
+        # Several would-be intervals pass; the parked loop stays silent.
+        await asyncio.sleep(0.3)
+        assert fake.publishes == []
+        assert state_calls == []
+        assert "ghost" in monitor._last_seen
+
+
+async def test_ping_loop_resume_publishes_immediately_and_rebases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A subscriber arriving wakes the loop: instant broadcast, stale entries rebased."""
+    monkeypatch.setattr(monitor_module, "_PING_INTERVAL", 0.05)
+    monkeypatch.setattr(monitor_module, "_OFFLINE_TIMEOUT", 10.0)
+
+    state_calls: list[tuple[str, DeviceState]] = []
+    presence = SubscriberPresence()
+    monitor = DeviceMqttMonitor(
+        broker=MqttBrokerConfig(host="x"),
+        on_state_change=lambda n, s: state_calls.append((n, s)),
+        on_ip_change=lambda *_: None,
+        presence=presence,
+    )
+    fake = _CountingClient()
+
+    loop = asyncio.get_running_loop()
+    stale_stamp = loop.time() - 100.0
+    monitor._last_seen["sleeper"] = stale_stamp
+
+    async with running_task(monitor._ping_loop(fake)):
+        await asyncio.sleep(0.1)
+        assert fake.publishes == []
+
+        with presence.subscriber():
+            for _ in range(100):
+                if fake.publishes:
+                    break
+                await asyncio.sleep(0.01)
+            assert fake.publishes, "no broadcast after a subscriber arrived"
+            assert monitor._last_seen["sleeper"] > stale_stamp
+            assert state_calls == []
+
+
+async def test_ping_loop_non_publisher_is_a_pure_listener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-broadcaster monitor neither publishes nor ages entries offline."""
+    monkeypatch.setattr(monitor_module, "_PING_INTERVAL", 0.05)
+    monkeypatch.setattr(monitor_module, "_OFFLINE_TIMEOUT", 0.1)
+
+    state_calls: list[tuple[str, DeviceState]] = []
+    monitor = DeviceMqttMonitor(
+        broker=MqttBrokerConfig(host="x"),
+        on_state_change=lambda n, s: state_calls.append((n, s)),
+        on_ip_change=lambda *_: None,
+    )
+    monitor.is_publisher = False
+    fake = _CountingClient()
+
+    loop = asyncio.get_running_loop()
+    monitor._last_seen["ghost"] = loop.time() - 1.0
+
+    async with running_task(monitor._ping_loop(fake)):
+        await asyncio.sleep(0.3)
+        assert fake.publishes == []
+        assert state_calls == []
+        assert "ghost" in monitor._last_seen
+
+
+async def test_ping_loop_failed_broadcast_pauses_aging_and_warns_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A tick whose broadcast failed neither ages devices nor spams the log."""
+    monkeypatch.setattr(monitor_module, "_PING_INTERVAL", 0.05)
+    monkeypatch.setattr(monitor_module, "_OFFLINE_TIMEOUT", 0.1)
+
+    class _FailingClient(_CountingClient):
+        def publish(self, topic: str, payload: Any = None, retain: bool = False) -> _PublishInfo:
+            super().publish(topic, payload, retain=retain)
+            info = _PublishInfo()
+            info.rc = 4
+            return info
+
+    state_calls: list[tuple[str, DeviceState]] = []
+    monitor = DeviceMqttMonitor(
+        broker=MqttBrokerConfig(host="x"),
+        on_state_change=lambda n, s: state_calls.append((n, s)),
+        on_ip_change=lambda *_: None,
+    )
+    fake = _FailingClient()
+    loop = asyncio.get_running_loop()
+    monitor._last_seen["ghost"] = loop.time() - 1.0
+
+    with caplog.at_level("DEBUG", logger="esphome_device_builder.controllers._device_mqtt_monitor"):
+        async with running_task(monitor._ping_loop(fake)):
+            for _ in range(100):
+                if len(fake.publishes) >= 3:
+                    break
+                await asyncio.sleep(0.01)
+
+    assert state_calls == []
+    assert "ghost" in monitor._last_seen
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "Discover broadcast" in warnings[0].getMessage()
+    assert any(
+        "still failing" in rec.message and rec.levelname == "DEBUG" for rec in caplog.records
+    )
+
+
+async def test_broadcast_recovery_rebases_and_rearms_warning() -> None:
+    """The first successful broadcast after a failed stretch rebases the ledger."""
+    monitor = DeviceMqttMonitor(
+        broker=MqttBrokerConfig(host="x"),
+        on_state_change=lambda *_: None,
+        on_ip_change=lambda *_: None,
+    )
+    monitor._publish_error_logged = True
+    loop = asyncio.get_running_loop()
+    stale_stamp = loop.time() - 100.0
+    monitor._last_seen["sleeper"] = stale_stamp
+
+    assert await monitor._broadcast(_CountingClient()) is True
+    assert monitor._last_seen["sleeper"] > stale_stamp
+    assert monitor._publish_error_logged is False
+
+
+async def test_stop_unsubscribes_presence_wake_callback() -> None:
+    """stop() detaches the wake callback so a dropped monitor can't leak into the gate."""
+    presence = SubscriberPresence()
+    monitor = DeviceMqttMonitor(
+        broker=MqttBrokerConfig(host="x"),
+        on_state_change=lambda *_: None,
+        on_ip_change=lambda *_: None,
+        presence=presence,
+    )
+    assert len(presence._subscriber_callbacks) == 1
+    await monitor.stop()
+    assert presence._subscriber_callbacks == []
+
+
+async def test_set_connected_fires_connection_change_on_transitions_only() -> None:
+    """_set_connected notifies once per edge, not per call."""
+    calls: list[bool] = []
+    monitor = DeviceMqttMonitor(
+        broker=MqttBrokerConfig(host="x"),
+        on_state_change=lambda *_: None,
+        on_ip_change=lambda *_: None,
+        on_connection_change=lambda: calls.append(True),
+    )
+    monitor._set_connected(value=True)
+    monitor._set_connected(value=True)
+    monitor._set_connected(value=False)
+    assert calls == [True, True]
+
+
+async def test_promotion_rebases_last_seen() -> None:
+    """set_publisher(False→True) rebases stamps aged during the no-broadcaster gap."""
+    monitor = DeviceMqttMonitor(
+        broker=MqttBrokerConfig(host="x"),
+        on_state_change=lambda *_: None,
+        on_ip_change=lambda *_: None,
+    )
+    monitor.is_publisher = False
+    loop = asyncio.get_running_loop()
+    stale_stamp = loop.time() - 100.0
+    monitor._last_seen["sleeper"] = stale_stamp
+
+    monitor.set_publisher(value=True)
+    assert monitor._last_seen["sleeper"] > stale_stamp
+
+    # Re-granting an already-held role must not touch the ledger.
+    monitor._last_seen["sleeper"] = stale_stamp
+    monitor.set_publisher(value=True)
+    assert monitor._last_seen["sleeper"] == stale_stamp
+
+
+async def test_ping_loop_subscriber_return_cuts_interval_sleep_short(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dashboard reopening mid-interval triggers a broadcast without the full wait."""
+    monkeypatch.setattr(monitor_module, "_PING_INTERVAL", 30.0)
+    monkeypatch.setattr(monitor_module, "_OFFLINE_TIMEOUT", 65.0)
+
+    presence = SubscriberPresence()
+    monitor = DeviceMqttMonitor(
+        broker=MqttBrokerConfig(host="x"),
+        on_state_change=lambda *_: None,
+        on_ip_change=lambda *_: None,
+        presence=presence,
+    )
+    fake = _CountingClient()
+
+    async with running_task(monitor._ping_loop(fake)):
+        with presence.subscriber():
+            for _ in range(100):
+                if fake.publishes:
+                    break
+                await asyncio.sleep(0.01)
+            assert len(fake.publishes) == 1
+        # Tab closed mid-interval, then reopened — the wake callback
+        # must abort the 30s sleep and broadcast promptly.
+        await asyncio.sleep(0.05)
+        with presence.subscriber():
+            for _ in range(100):
+                if len(fake.publishes) >= 2:
+                    break
+                await asyncio.sleep(0.01)
+            assert len(fake.publishes) >= 2
 
 
 # ---------------------------------------------------------------------------
@@ -1449,7 +1759,51 @@ async def test_start_spawns_run_task_when_paho_available(
     assert monitor.running is False
 
 
-async def test_connect_and_listen_subscribes_publishes_and_runs_listen_ping(  # noqa: C901
+class _FakePahoClient:
+    """Configurable paho stand-in; subclasses override only what varies."""
+
+    connack_rc = 0
+
+    def __init__(self, client_id: str = "", clean_session: bool = True) -> None:
+        self.on_connect: Any = None
+        self.on_subscribe: Any = None
+        self.on_message: Any = None
+        self._record("init", (client_id, clean_session))
+
+    def _record(self, op: str, args: tuple[Any, ...]) -> None:
+        return None
+
+    def username_pw_set(self, username: str, password: str) -> None:
+        self._record("username_pw_set", (username, password))
+
+    def connect(self, host: str, port: int) -> None:
+        self._record("connect", (host, port))
+
+    def loop_start(self) -> None:
+        self._record("loop_start", ())
+        # Fire on_connect the way paho's network thread would; tests
+        # run it directly since the call reaches them via the executor.
+        self.on_connect(self, None, None, self.connack_rc)
+
+    def loop_stop(self) -> None:
+        self._record("loop_stop", ())
+
+    def subscribe(self, topic: str) -> tuple[int, int]:
+        self._record("subscribe", (topic,))
+        # Model a healthy broker: the SUBACK grants the subscription.
+        if self.on_subscribe is not None:
+            self.on_subscribe(self, None, 1, [0])
+        return (0, 1)
+
+    def publish(self, topic: str, payload: Any = None, retain: bool = False) -> _PublishInfo:
+        self._record("publish", (topic, payload, retain))
+        return _PublishInfo()
+
+    def disconnect(self) -> None:
+        self._record("disconnect", ())
+
+
+async def test_connect_and_listen_subscribes_publishes_and_runs_listen_ping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``_connect_and_listen`` wires paho callbacks, subscribes, and runs the inner tasks.
@@ -1457,8 +1811,9 @@ async def test_connect_and_listen_subscribes_publishes_and_runs_listen_ping(  # 
     Drive the full body without a real broker by stubbing
     ``paho_mqtt.Client`` and the inner ``_listen`` / ``_ping_loop``
     coroutines. Pin: ``connect`` / ``loop_start`` / ``subscribe``
-    / ``publish`` are called in order, the inner tasks fire, and
-    teardown runs ``loop_stop`` + ``disconnect`` even on cancel.
+    are called in order with no connect-time publish (broadcasts
+    belong to the gated ping loop), the inner tasks fire, and
+    teardown runs ``disconnect`` + ``loop_stop`` even on cancel.
     """
     monitor = DeviceMqttMonitor(
         broker=MqttBrokerConfig(host="broker.local", port=1883, username="alice", password="x"),
@@ -1470,41 +1825,16 @@ async def test_connect_and_listen_subscribes_publishes_and_runs_listen_ping(  # 
     listen_started = asyncio.Event()
     ping_started = asyncio.Event()
 
-    class _FakeClient:
-        def __init__(self, client_id: str = "", clean_session: bool = True) -> None:
-            calls.append(("init", (client_id, clean_session)))
-            self.on_connect: Any = None
-            self.on_message: Any = None
-
-        def username_pw_set(self, username: str, password: str) -> None:
-            calls.append(("username_pw_set", (username, password)))
-
-        def connect(self, host: str, port: int) -> None:
-            calls.append(("connect", (host, port)))
+    class _FakeClient(_FakePahoClient):
+        def _record(self, op: str, args: tuple[Any, ...]) -> None:
+            calls.append((op, args))
 
         def loop_start(self) -> None:
-            calls.append(("loop_start", ()))
-            # Fire on_connect with rc=0 (success) on a thread-like
-            # callback. Production calls this from paho's network
-            # thread via call_soon_threadsafe; here we call it
-            # directly since we're already on the loop.
-            self.on_connect(self, None, None, 0)
-            # Fire one on_message so the inner queue-bridge
-            # closure (line 166) gets exercised.
+            super().loop_start()
+            # Fire one on_message so the queue-bridge closure gets
+            # exercised.
             fake_msg = type("M", (), {"topic": "x", "payload": b"", "retain": False})()
             self.on_message(self, None, fake_msg)
-
-        def loop_stop(self) -> None:
-            calls.append(("loop_stop", ()))
-
-        def subscribe(self, topic: str) -> None:
-            calls.append(("subscribe", (topic,)))
-
-        def publish(self, topic: str, payload: Any = None, retain: bool = False) -> None:
-            calls.append(("publish", (topic, payload, retain)))
-
-        def disconnect(self) -> None:
-            calls.append(("disconnect", ()))
 
     monkeypatch.setattr(monitor_module, "paho_mqtt", type("M", (), {"Client": _FakeClient}))
 
@@ -1519,33 +1849,327 @@ async def test_connect_and_listen_subscribes_publishes_and_runs_listen_ping(  # 
     monkeypatch.setattr(monitor, "_listen", _fake_listen)
     monkeypatch.setattr(monitor, "_ping_loop", _fake_ping)
 
-    task = asyncio.create_task(monitor._connect_and_listen("test-id"))
-    try:
+    async with running_task(monitor._connect_and_listen("test-id")):
         await asyncio.wait_for(listen_started.wait(), timeout=2.0)
         await asyncio.wait_for(ping_started.wait(), timeout=2.0)
-    finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
 
     op_names = [c[0] for c in calls]
-    # Ordered: init → username/pw → connect → loop_start → subscribe
-    # → publish → loop_stop → disconnect.
+    # Ordered: init → username/pw → connect → loop_start (whose CONNACK
+    # callback subscribes) → disconnect → loop_stop. No publish here —
+    # the ping loop owns every broadcast so the subscriber gate can
+    # hold them all.
     assert op_names == [
         "init",
         "username_pw_set",
         "connect",
         "loop_start",
         "subscribe",
-        "publish",
-        "loop_stop",
         "disconnect",
+        "loop_stop",
     ]
-    # Subscribe goes against the discover wildcard; publish kicks
-    # the broker for an immediate announce.
     assert ("subscribe", ("esphome/discover/#",)) in calls
-    publishes = [c for c in calls if c[0] == "publish"]
-    assert publishes == [("publish", ("esphome/discover", None, False))]
+
+
+def _fail_rc(_topic: str) -> tuple[int, int]:
+    return (7, 1)
+
+
+def _fail_raise(_topic: str) -> tuple[int, int]:
+    raise RuntimeError("boom")
+
+
+@pytest.mark.parametrize(
+    ("subscribe_impl", "match"),
+    [
+        pytest.param(_fail_rc, "subscribe failed \\(rc=7\\)", id="nonzero_rc"),
+        pytest.param(_fail_raise, "subscribe raised", id="raises"),
+    ],
+)
+async def test_subscribe_failure_fails_the_session_loud(
+    monkeypatch: pytest.MonkeyPatch,
+    subscribe_impl: Callable[[str], tuple[int, int]],
+    match: str,
+) -> None:
+    """A failed or raising subscribe surfaces as ConnectionError, never a silent timeout."""
+
+    class _FakeClient(_FakePahoClient):
+        def subscribe(self, topic: str) -> tuple[int, int]:
+            return subscribe_impl(topic)
+
+    monkeypatch.setattr(monitor_module, "paho_mqtt", type("M", (), {"Client": _FakeClient}))
+    monitor = DeviceMqttMonitor(
+        broker=MqttBrokerConfig(host="broker.local"),
+        on_state_change=lambda *_: None,
+        on_ip_change=lambda *_: None,
+    )
+    with pytest.raises(ConnectionError, match=match):
+        await monitor._connect_and_listen("test-id")
+
+
+async def test_reconnect_subscribe_failure_tears_the_session_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed re-subscribe on paho's auto-reconnect rebuilds the session, not a dead list."""
+    monitor = DeviceMqttMonitor(
+        broker=MqttBrokerConfig(host="broker.local"),
+        on_state_change=lambda *_: None,
+        on_ip_change=lambda *_: None,
+    )
+
+    session_running = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    instances: list[Any] = []
+
+    class _FakeClient(_FakePahoClient):
+        def __init__(self, client_id: str = "", clean_session: bool = True) -> None:
+            super().__init__(client_id, clean_session)
+            self.subscribe_calls = 0
+            instances.append(self)
+
+        def subscribe(self, topic: str) -> tuple[int, int]:
+            self.subscribe_calls += 1
+            return (0, 1) if self.subscribe_calls == 1 else (7, 2)
+
+        def publish(self, topic: str, payload: Any = None, retain: bool = False) -> _PublishInfo:
+            # The ping loop broadcasting proves the session TaskGroup
+            # is running, so the re-fired CONNACK below exercises the
+            # watcher path, not the initial handshake check.
+            loop.call_soon_threadsafe(session_running.set)
+            return _PublishInfo()
+
+    monkeypatch.setattr(monitor_module, "paho_mqtt", type("M", (), {"Client": _FakeClient}))
+
+    task = asyncio.create_task(monitor._connect_and_listen("test-id"))
+    await asyncio.wait_for(session_running.wait(), timeout=2.0)
+    # paho's auto-reconnect re-fires on_connect; this re-subscribe fails.
+    instances[0].on_connect(instances[0], None, None, 0)
+
+    with pytest.raises(ConnectionError, match="subscribe failed \\(rc=7\\)"):
+        await asyncio.wait_for(task, timeout=2.0)
+
+
+async def test_acl_denied_subscription_tears_the_session_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A SUBACK 0x80 (broker ACL denial) fails the session instead of going dark."""
+    monitor = DeviceMqttMonitor(
+        broker=MqttBrokerConfig(host="broker.local"),
+        on_state_change=lambda *_: None,
+        on_ip_change=lambda *_: None,
+    )
+
+    session_running = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    instances: list[Any] = []
+
+    class _FakeClient(_FakePahoClient):
+        def __init__(self, client_id: str = "", clean_session: bool = True) -> None:
+            super().__init__(client_id, clean_session)
+            instances.append(self)
+
+        def publish(self, topic: str, payload: Any = None, retain: bool = False) -> _PublishInfo:
+            loop.call_soon_threadsafe(session_running.set)
+            return _PublishInfo()
+
+    monkeypatch.setattr(monitor_module, "paho_mqtt", type("M", (), {"Client": _FakeClient}))
+
+    task = asyncio.create_task(monitor._connect_and_listen("test-id"))
+    await asyncio.wait_for(session_running.wait(), timeout=2.0)
+    # The broker's SUBACK arrives after the handshake looked healthy.
+    instances[0].on_subscribe(instances[0], None, 1, [0x80])
+
+    with pytest.raises(ConnectionError, match="subscription denied"):
+        await asyncio.wait_for(task, timeout=2.0)
+
+
+async def test_missing_suback_fails_the_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broker that never SUBACKs fails the session instead of staying dark."""
+    monkeypatch.setattr(monitor_module, "_CONNECT_TIMEOUT", 0.2)
+
+    monitor = DeviceMqttMonitor(
+        broker=MqttBrokerConfig(host="broker.local"),
+        on_state_change=lambda *_: None,
+        on_ip_change=lambda *_: None,
+    )
+
+    class _FakeClient(_FakePahoClient):
+        def subscribe(self, topic: str) -> tuple[int, int]:
+            return (0, 1)  # accepted, but no SUBACK ever arrives
+
+    monkeypatch.setattr(monitor_module, "paho_mqtt", type("M", (), {"Client": _FakeClient}))
+
+    with pytest.raises(ConnectionError, match="no SUBACK"):
+        await asyncio.wait_for(monitor._connect_and_listen("test-id"), timeout=2.0)
+
+
+async def test_missing_suback_on_reconnect_fails_the_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SUBACK guard re-arms per handshake — a silent reconnect SUBACK also fails."""
+    monkeypatch.setattr(monitor_module, "_CONNECT_TIMEOUT", 0.3)
+
+    monitor = DeviceMqttMonitor(
+        broker=MqttBrokerConfig(host="broker.local"),
+        on_state_change=lambda *_: None,
+        on_ip_change=lambda *_: None,
+    )
+
+    session_running = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    instances: list[Any] = []
+
+    class _FakeClient(_FakePahoClient):
+        def __init__(self, client_id: str = "", clean_session: bool = True) -> None:
+            super().__init__(client_id, clean_session)
+            self.subscribe_calls = 0
+            instances.append(self)
+
+        def subscribe(self, topic: str) -> tuple[int, int]:
+            self.subscribe_calls += 1
+            if self.subscribe_calls == 1:
+                return super().subscribe(topic)  # healthy: SUBACK granted
+            return (0, 1)  # accepted, but the reconnect SUBACK never arrives
+
+        def publish(self, topic: str, payload: Any = None, retain: bool = False) -> _PublishInfo:
+            loop.call_soon_threadsafe(session_running.set)
+            return _PublishInfo()
+
+    monkeypatch.setattr(monitor_module, "paho_mqtt", type("M", (), {"Client": _FakeClient}))
+
+    task = asyncio.create_task(monitor._connect_and_listen("test-id"))
+    await asyncio.wait_for(session_running.wait(), timeout=2.0)
+    # paho's auto-reconnect re-fires on_connect; this handshake's
+    # SUBACK is silently dropped.
+    instances[0].on_connect(instances[0], None, None, 0)
+
+    with pytest.raises(ConnectionError, match="no SUBACK"):
+        await asyncio.wait_for(task, timeout=2.0)
+
+
+async def test_idle_monitor_still_applies_spontaneous_announcements() -> None:
+    """The listen path is not presence-gated — announcements apply while parked."""
+    presence = SubscriberPresence()
+    state_calls: list[tuple[str, DeviceState]] = []
+    monitor = DeviceMqttMonitor(
+        broker=MqttBrokerConfig(host="x"),
+        on_state_change=lambda n, s: state_calls.append((n, s)),
+        on_ip_change=lambda *_: None,
+        presence=presence,
+    )
+    assert not presence.has_subscribers()
+
+    queue: asyncio.Queue[Any] = asyncio.Queue()
+    await queue.put(
+        type(
+            "M",
+            (),
+            {
+                "topic": "esphome/discover/kitchen",
+                "payload": json.dumps({"name": "kitchen"}).encode(),
+                "retain": False,
+            },
+        )()
+    )
+    async with running_task(monitor._listen(queue)):
+        for _ in range(100):
+            if state_calls:
+                break
+            await asyncio.sleep(0.01)
+
+    assert state_calls == [("kitchen", DeviceState.ONLINE)]
+    assert "kitchen" in monitor._last_seen
+
+
+@pytest.mark.parametrize("failing_call", ["disconnect", "loop_stop"])
+async def test_teardown_failure_does_not_mask_the_session_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failing_call: str
+) -> None:
+    """A raising teardown call is logged, its sibling still runs, and the session error surfaces."""
+    monitor = DeviceMqttMonitor(
+        broker=MqttBrokerConfig(host="broker.local"),
+        on_state_change=lambda *_: None,
+        on_ip_change=lambda *_: None,
+    )
+
+    torn_down: list[str] = []
+
+    class _FakeClient(_FakePahoClient):
+        connack_rc = 4  # "bad username/password" — any non-zero rejects
+
+        def _record(self, op: str, args: tuple[Any, ...]) -> None:
+            if op in ("disconnect", "loop_stop"):
+                torn_down.append(op)
+
+        def disconnect(self) -> None:
+            super().disconnect()
+            if failing_call == "disconnect":
+                raise RuntimeError("boom")
+
+        def loop_stop(self) -> None:
+            super().loop_stop()
+            if failing_call == "loop_stop":
+                raise RuntimeError("boom")
+
+    monkeypatch.setattr(monitor_module, "paho_mqtt", type("M", (), {"Client": _FakeClient}))
+
+    with (
+        caplog.at_level("ERROR", logger="esphome_device_builder.controllers._device_mqtt_monitor"),
+        pytest.raises(ConnectionError, match="rc=4"),
+    ):
+        await monitor._connect_and_listen("test-id")
+    assert monitor.connected is False
+    # A raising disconnect must not skip the thread join, or the paho
+    # thread leaks every reconnect cycle.
+    assert torn_down == ["disconnect", "loop_stop"]
+    assert any("teardown failed" in rec.message for rec in caplog.records)
+
+
+def test_unwrap_session_error_keeps_mixed_groups() -> None:
+    """Only a lone expected connection error unwraps; anything else stays grouped."""
+    lone = ExceptionGroup("g", [ConnectionError("x")])
+    assert isinstance(monitor_module._unwrap_session_error(lone), ConnectionError)
+    paired = ExceptionGroup("g", [ConnectionError("x"), OSError("y")])
+    assert isinstance(monitor_module._unwrap_session_error(paired), ConnectionError)
+    mixed = ExceptionGroup("g", [ConnectionError("x"), ValueError("y")])
+    assert monitor_module._unwrap_session_error(mixed) is mixed
+
+
+async def test_reconnect_refires_subscribe_via_on_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every CONNACK resubscribes, so paho's auto-reconnect can't lose the topic."""
+    monitor = DeviceMqttMonitor(
+        broker=MqttBrokerConfig(host="broker.local"),
+        on_state_change=lambda *_: None,
+        on_ip_change=lambda *_: None,
+    )
+
+    subscribes: list[str] = []
+    subscribed = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    instances: list[Any] = []
+
+    class _FakeClient(_FakePahoClient):
+        def __init__(self, client_id: str = "", clean_session: bool = True) -> None:
+            super().__init__(client_id, clean_session)
+            instances.append(self)
+
+        def subscribe(self, topic: str) -> tuple[int, int]:
+            subscribes.append(topic)
+            loop.call_soon_threadsafe(subscribed.set)
+            return (0, 1)
+
+    monkeypatch.setattr(monitor_module, "paho_mqtt", type("M", (), {"Client": _FakeClient}))
+
+    async with running_task(monitor._connect_and_listen("test-id")):
+        await asyncio.wait_for(subscribed.wait(), timeout=2.0)
+        assert subscribes == ["esphome/discover/#"]
+        # paho's auto-reconnect re-fires on_connect from its thread;
+        # the callback alone must re-establish the subscription.
+        instances[0].on_connect(instances[0], None, None, 0)
+        assert subscribes == ["esphome/discover/#", "esphome/discover/#"]
 
 
 async def test_connect_and_listen_raises_on_broker_rejection(
@@ -1566,37 +2190,20 @@ async def test_connect_and_listen_raises_on_broker_rejection(
 
     teardown_calls: list[str] = []
 
-    class _FakeClient:
-        def __init__(self, client_id: str = "", clean_session: bool = True) -> None:
-            self.on_connect: Any = None
-            self.on_message: Any = None
+    class _FakeClient(_FakePahoClient):
+        connack_rc = 4  # "bad username/password" — any non-zero rejects
 
-        def connect(self, host: str, port: int) -> None:
-            return None
-
-        def loop_start(self) -> None:
-            # rc=4 == "bad username/password" — any non-zero rejects.
-            self.on_connect(self, None, None, 4)
-
-        def loop_stop(self) -> None:
-            teardown_calls.append("loop_stop")
-
-        def subscribe(self, topic: str) -> None:
-            return None
-
-        def publish(self, *_args: Any, **_kwargs: Any) -> None:
-            return None
-
-        def disconnect(self) -> None:
-            teardown_calls.append("disconnect")
+        def _record(self, op: str, args: tuple[Any, ...]) -> None:
+            if op in ("loop_stop", "disconnect"):
+                teardown_calls.append(op)
 
     monkeypatch.setattr(monitor_module, "paho_mqtt", type("M", (), {"Client": _FakeClient}))
 
     with pytest.raises(ConnectionError, match="rc=4"):
         await monitor._connect_and_listen("test-id")
 
-    # Teardown ran even though we raised.
-    assert teardown_calls == ["loop_stop", "disconnect"]
+    # Teardown ran even though we raised, in paho's documented order.
+    assert teardown_calls == ["disconnect", "loop_stop"]
 
 
 async def test_run_reconnects_on_connect_and_listen_failure(
@@ -1641,13 +2248,8 @@ async def test_run_reconnects_on_connect_and_listen_failure(
 
     monkeypatch.setattr(monitor, "_connect_and_listen", _fake_connect)
 
-    run_task = asyncio.create_task(monitor._run())
-    try:
+    async with running_task(monitor._run()):
         await asyncio.wait_for(second_call.wait(), timeout=2.0)
-    finally:
-        run_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await run_task
 
     assert call_count >= 2
     # First-attempt error cleared last_seen — pin the contract
@@ -1694,13 +2296,8 @@ async def test_run_collapses_repeat_unreachable_errors_to_debug(
 
     caplog.set_level("DEBUG", logger=monitor_module.__name__)
 
-    run_task = asyncio.create_task(monitor._run())
-    try:
+    async with running_task(monitor._run()):
         await asyncio.wait_for(third_call.wait(), timeout=2.0)
-    finally:
-        run_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await run_task
 
     unreachable = [
         r
@@ -1770,16 +2367,11 @@ async def test_run_resets_log_gate_after_successful_connect(
 
     caplog.set_level("DEBUG", logger=monitor_module.__name__)
 
-    run_task = asyncio.create_task(monitor._run())
-    try:
+    async with running_task(monitor._run()):
         await asyncio.wait_for(third_failure.wait(), timeout=2.0)
         # Give the loop one extra tick to log the third failure
         # before we tear it down.
         await asyncio.sleep(0.05)
-    finally:
-        run_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await run_task
 
     warnings = [
         r
@@ -1849,14 +2441,9 @@ async def test_run_loud_logs_unexpected_after_expected_failure(
 
     caplog.set_level("DEBUG", logger=monitor_module.__name__)
 
-    run_task = asyncio.create_task(monitor._run())
-    try:
+    async with running_task(monitor._run()):
         await asyncio.wait_for(second_call.wait(), timeout=2.0)
         await asyncio.sleep(0.05)
-    finally:
-        run_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await run_task
 
     errors = [
         r
@@ -1910,13 +2497,8 @@ async def test_run_collapses_repeat_unexpected_errors_to_debug(
 
     caplog.set_level("DEBUG", logger=monitor_module.__name__)
 
-    run_task = asyncio.create_task(monitor._run())
-    try:
+    async with running_task(monitor._run()):
         await asyncio.wait_for(third_call.wait(), timeout=2.0)
-    finally:
-        run_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await run_task
 
     errors = [
         r

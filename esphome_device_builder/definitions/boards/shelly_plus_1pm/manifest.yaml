@@ -18,7 +18,7 @@ tags:
 pins:
 - gpio: 4
   available: false
-  occupied_by: Switch
+  occupied_by: Shelly Plus 1PM Switch
 - gpio: 5
   available: false
   occupied_by: sensor.hlw8012
@@ -36,7 +36,7 @@ pins:
   occupied_by: temp_analog_reading
 - gpio: 33
   available: false
-  occupied_by: Relay Supply Voltage
+  occupied_by: Shelly Plus 1PM Relay Supply Voltage
 docs_url: https://devices.esphome.io/devices/Shelly-Plus-1PM/
 featured_components:
 - id: binary_sensor_gpio_1
@@ -45,8 +45,12 @@ featured_components:
     pin:
       value: 4
       locked: true
+    filters:
+      value:
+      - delayed_on_off: 50ms
+      locked: true
     id: binary_sensor_gpio_1
-    name: Switch
+    name: Shelly Plus 1PM Switch
 - id: relay_output
   component_id: output.gpio
   fields:
@@ -54,15 +58,6 @@ featured_components:
       value: 26
       locked: true
     id: relay_output
-- id: sensor_ntc_1
-  component_id: sensor.ntc
-  fields:
-    unit_of_measurement: °C
-    accuracy_decimals: 1
-    icon: mdi:thermometer
-    sensor: temp_resistance_reading
-    id: sensor_ntc_1
-    name: Temperature
 - id: temp_resistance_reading
   component_id: sensor.resistance
   fields:
@@ -87,8 +82,12 @@ featured_components:
       value: 33
       locked: true
     attenuation: 12db
+    filters:
+      value:
+      - multiply: 8
+      locked: true
     id: sensor_adc_2
-    name: Relay Supply Voltage
+    name: Shelly Plus 1PM Relay Supply Voltage
 - id: sensor_hlw8012_1
   component_id: sensor.hlw8012
   fields:
@@ -106,35 +105,25 @@ featured_components:
     cf1_pin:
       value: 18
       locked: true
+    current_resistor: '0.001'
+    voltage_divider: '1925'
     change_mode_every: 2
     update_interval: 10s
     id: sensor_hlw8012_1
-- id: sensor_total_daily_energy_1
-  component_id: sensor.total_daily_energy
-  fields:
-    unit_of_measurement: kWh
-    icon: mdi:clock-alert
-    id: sensor_total_daily_energy_1
-    name: Daily energy consumed
 - id: relay
   component_id: switch.output
   fields:
     output: relay_output
     id: relay
-    name: Relay
+    name: Shelly Plus 1PM Relay
 featured_bundles:
-- id: sensor_ntc_1_setup
-  name: Temperature (full setup)
-  component_ids:
-  - temp_resistance_reading
-  - sensor_ntc_1
 - id: temp_resistance_reading_setup
   name: temp_resistance_reading (full setup)
   component_ids:
   - temp_analog_reading
   - temp_resistance_reading
 - id: relay_setup
-  name: Relay (full setup)
+  name: Shelly Plus 1PM Relay (full setup)
   component_ids:
   - relay_output
   - relay
@@ -142,5 +131,5 @@ source:
   type: esphome-devices
   remote_id: Shelly-Plus-1PM
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Shelly-Plus-1PM/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: f27f751d688e2f5f3333007c620b62c13af34c5dee1b163285563a0eaf5e8c44

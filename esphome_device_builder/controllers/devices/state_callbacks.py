@@ -88,27 +88,73 @@ def on_source_change(controller: DevicesController, name: str, source: Reachabil
         controller._fire_device_updated(device)
 
 
-def on_ip_change(controller: DevicesController, name: str, ip: str, addresses: list[str]) -> None:
-    """Forward IP updates onto the event bus and persist the primary value.
+def on_deployed_identity_live_change(
+    controller: DevicesController, name: str, *, live: bool
+) -> None:
+    """Update ``deployed_identity_live`` and fire DEVICE_UPDATED; runtime-only, not persisted."""
+    for device in controller._devices_by_name(name):
+        if device.runtime_state.deployed_identity_live == live:
+            continue
+        device.runtime_state.deployed_identity_live = live
+        controller._fire_device_updated(device)
 
-    ``ip=""`` (empty *addresses*) keeps the last-known primary
-    on disk so the OTA address cache survives offline windows.
-    """
+
+def on_ip_change(controller: DevicesController, name: str, ip: str, addresses: list[str]) -> None:
+    """Forward IP updates onto the event bus and persist the primary value."""
     new_addresses = list(addresses)
     for device in controller._devices_by_name(name):
         if device.ip == ip and device.runtime_state.ip_addresses == new_addresses:
             continue
-        ip_changed = device.ip != ip
-        device.ip = ip
+        if device.ip != ip:
+            device.ip = ip
+            controller._metadata_store.update(device.configuration, ip=ip)
         device.runtime_state.ip_addresses = list(new_addresses)
         _LOGGER.debug(
             "Device %s (%s) IPs: %s",
             name,
             device.configuration,
-            ", ".join(new_addresses) or "(cleared)",
+            ", ".join(new_addresses),
         )
-        if ip and ip_changed:
-            controller._metadata_store.update(device.configuration, ip=ip)
+        controller._fire_device_updated(device)
+
+
+def on_resolved_addresses_cleared(controller: DevicesController, name: str) -> None:
+    """
+    Clear the resolved set after a confirmed loss of mDNS resolution.
+
+    ``device.ip`` keeps the last-known primary in RAM and on disk so
+    the OTA address cache and the api_reviver's cohort gate survive
+    offline windows.
+    """
+    for device in controller._devices_by_name(name):
+        if not device.runtime_state.ip_addresses:
+            continue
+        device.runtime_state.ip_addresses = []
+        _LOGGER.debug("Device %s (%s) IPs: (cleared)", name, device.configuration)
+        controller._fire_device_updated(device)
+
+
+def on_persisted_ip_invalidated(controller: DevicesController, name: str, stale_ip: str) -> None:
+    """
+    Clear a persisted last-known IP the reviver proved belongs to another device.
+
+    The explicit counterpart to :func:`on_ip_change`'s keep-on-disk
+    contract — only identity-verified evidence gets to drop the value,
+    and only from devices still holding the proven-stale IP (a
+    same-name sibling's independent IP, or one mDNS re-learned while
+    the dial was in flight, is not what the mismatch disproved).
+    """
+    for device in controller._devices_by_name(name):
+        if device.ip != stale_ip:
+            continue
+        _LOGGER.info(
+            "Device %s (%s): clearing stale persisted IP %s",
+            name,
+            device.configuration,
+            device.ip,
+        )
+        device.ip = ""
+        controller._metadata_store.update(device.configuration, ip="")
         controller._fire_device_updated(device)
 
 

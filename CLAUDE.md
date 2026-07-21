@@ -325,12 +325,28 @@ against legacy behaviour before assuming the simpler version suffices.
   emitter and walks `models.*` to assert coverage. New events ship with a
   TypedDict from day one and a row in `_PAYLOAD_FACTORIES`. Full
   rationale in `docs/ARCHITECTURE.md` "Event bus → Typing event payloads".
-- **Persistent firmware queue — two concurrent lanes.** A CPU/compile lane
-  and a network/upload lane each run one job at a time, but run
-  concurrently, so a slow upload doesn't block the next compile (#3702).
-  `FirmwareState.compile_lane` / `upload_lane` (`controllers/firmware/
-  _state.py`); `lane_for(job)` routes UPLOAD to the upload lane, everything
-  else to compile. `firmware/install` enqueues a COMPILE job + a dependent
+- **Persistent firmware queue — three concurrent lanes.** A CPU/compile
+  lane (one job at a time), a network/upload lane (up to
+  `MAX_CONCURRENT_UPLOADS` = 3 flashes at once — the cap bounds
+  subprocess-tree memory), and a single-slot thread upload lane, all
+  running concurrently, so a slow upload doesn't block the next compile
+  (#3702) or the next flash. Upload concurrency exists for deep-sleep
+  wake delivery (esphome discussion #3781): several deep-sleep devices
+  waking at once must each get their queued update inside the wake
+  window, or they sleep again and the updates fail.
+  `FirmwareState.compile_lane` / `upload_lane` / `thread_upload_lane`
+  (`controllers/firmware/_state.py`); each lane spawns
+  `Lane.max_concurrency` workers off one FIFO queue, jobs occupying a
+  lane sit in `Lane.active` (job-id keyed), and running subprocesses live
+  in the job-keyed `FirmwareState.processes` registry so cancel
+  (`terminate_job_process`) signals exactly one job. `lane_for(job)`
+  routes a network flash of an OpenThread device to the thread lane
+  (Thread devices share one mesh/border router — concurrent OTAs starve
+  it) via `state.is_thread_configuration`, wired at controller
+  construction to `DevicesController.is_thread_device` (`"openthread" in
+  loaded_integrations`; unknown/never-compiled → normal upload lane).
+  Everything not a network flash runs on the compile lane.
+  `firmware/install` enqueues a COMPILE job + a dependent
   local UPLOAD job (`FirmwareJob.depends_on`); the upload is held off its
   lane until the compile succeeds (`lifecycle.release_dependents`), and a
   cancelled/failed compile cascades to cancel the held upload (so a
@@ -377,12 +393,13 @@ against legacy behaviour before assuming the simpler version suffices.
   `script/update_board.py [board-id]` (auto-detects the edited board) to
   regenerate its JSON and validate in one step. It wraps
   `script/sync_boards.py <board-id>` (single board) / `sync_boards.py`
-  (all) + `validate_definitions.py`. Single-board mode refuses unless the
+  (all) + `validate_definitions.py`. Both modes refuse unless the
   installed `esphome` matches the `esphome_version` stamped in
-  `boards.index.json` by the last full sync (betas canonicalized to base, as
-  it rebuilds the shared index from every board); a full sync regenerates
-  everything from the installed esphome and re-stamps it, so it doesn't
-  check. Full contributor workflow: `definitions/README.md`.
+  `boards.index.json` by the last full sync (betas canonicalized to base);
+  `sync_boards.py --restamp` is the explicit opt-in to regenerate every
+  board against the installed esphome and re-stamp that version (the
+  catalog-sync workflows' esphome-bump path). Full contributor workflow:
+  `definitions/README.md`.
 - **Frontend handoff** for the catalog is documented inline in models
   (`ConfigEntry`, `ComponentCatalogEntry`). New `ConfigEntryType` values
   need a frontend update — coordinate.
@@ -497,10 +514,13 @@ against legacy behaviour before assuming the simpler version suffices.
   is dark in some deployments (Docker-bridge), so `refresh_after_job`
   also arms a `loop.call_later` timer (`_schedule_version_reprobe`,
   tracked in `_reprobe_timers`, cancelled in `stop()`) that ~60s later
-  forces one Native-API version probe via `request_version_reprobe` —
+  forces one Native-API version probe via `api_info.request_reprobe` —
   the only signal of a rollback / failed boot where the announce never
   arrives. The forced probe still honours `_is_due`'s `priority_for !=
-  MDNS` guard, so a device already seen over mDNS is skipped.
+  MDNS` guard, so a device already seen over mDNS is skipped. The sync
+  also stamps `deployed_identity_live`; the monitor's apply refuses the
+  stamp for an mdns-owned api device (the announce vouches there, and a
+  stamp under ownership would never see the transition-to-mdns clear).
 - **Two mDNS paths with different OFFLINE semantics:**
   - **Browser callback** (`_on_service_state_change`) — passively
     subscribed to `_esphomelib._tcp.local.`. Trust mDNS **both
@@ -531,21 +551,89 @@ against legacy behaviour before assuming the simpler version suffices.
     has no browser `Removed` counterpart, so it locks out `should_ping` and
     latches the device ONLINE forever (#1776). The `ping`-source result
     (priority 1) stays sweep-eligible so a dead entry demotes.
-  - **`_http._tcp` version fallback** (`MdnsSource._on_http_service_state_change`,
-    for a configured device with `mqtt:` but no `api:`). Such a device never
-    publishes `_esphomelib._tcp` (behind `USE_API`); its only broadcast is a
-    bare `_http._tcp` fallback carrying a lone `version` TXT. Read that
-    `version` through `apply_version` and **nothing else** — `mac` /
-    `config_hash` / api-encryption live only on `_esphomelib._tcp`, and the
-    fallback carries no version TXT once the device gains a web server. Drive
-    **no** state off it (no ONLINE claim, `Removed` ignored): the same shared
-    browser watches `_http._tcp`, but reachability stays owned by the
-    active-resolve / MQTT / ping paths, so an all-API name bucket is skipped
-    (a device broadcasting the API gets its version from the esphomelib path).
+  - **`_http._tcp` identity fallback** (`MdnsSource._on_http_service_state_change`,
+    for a configured device without `api:`). Such a device never publishes
+    `_esphomelib._tcp` (behind `USE_API`); its broadcast is the `_http._tcp`
+    service — the bare fallback, or `web_server`'s own. On new firmware
+    (esphome/esphome#17520) that service carries the identity TXT trio
+    `version` / `mac` / `config_hash`; older firmware carries `version`
+    only on the fallback and nothing on a web_server service. Read the
+    identity keys through the shared `_apply_identity_txt` (each key
+    tolerates absence) and **nothing else** — never api-encryption: the
+    absent-key-means-plaintext rule from the esphomelib path would stamp
+    a false confirmation on a device with no API. Drive **no** reachability
+    off it (no ONLINE claim, `Removed` ignored): the same shared browser
+    watches `_http._tcp`, but reachability stays owned by the
+    active-resolve / MQTT / ping paths, so an all-API name bucket is
+    skipped (a device broadcasting the API gets its identity from the
+    esphomelib path). The level-triggered repair (`reconcile_from_cache`)
+    reads both services' cached TXT. The one state the path does drive is
+    the non-API side of `runtime_state.deployed_identity_live` — the
+    session-only freshness bit the frontend gates the deployed identity
+    on (a non-API device's `mdns` ownership is a bare A-record resolve
+    from the active-resolve path above, reachability only, so it can't
+    vouch). Stamped by every identity-bearing apply and by the post-flash
+    optimistic sync; level-synced against the unexpired cached TXT each
+    API-info sweep, whose clear side needs a cached mDNS trace plus a
+    confirming re-resolve (`verify_http_identity`) — never demote on
+    uncertainty, and an mDNS-dark deployment (post-flash stamp only) is
+    never demoted at all. The api side of the same flag is owned by the
+    Native-API paths instead: `apply_worker_info` stamps it on any
+    identity-carrying `device_info` payload (API-info probe, reviver
+    dial). The ownership rule lives once, in the monitor
+    (`_mdns_owns_api_identity`): `live=True` is refused while mDNS owns
+    an api device, and the flag clears when mDNS takes ownership,
+    handing blanking to the announce lifecycle.
+  - **Resolve-first sweep step** (`resolve_api_mdns_targets`, for ONLINE
+    API devices the ping sweep is about to ICMP). Exists because the
+    zeroconf browser never re-asks: after its startup queries it only
+    refreshes PTRs it already holds (rescue window at 75–100% of the
+    TTL), and a `Removed` cancels that schedule — from then on
+    re-discovery rides solely on the device's few boot-time announces.
+    The ways in (dashboard host suspended past the rescue window so the
+    wake expires every PTR at once; an OTA / crash goodbye; an expiry
+    whose reconnect announces were lost) all end the same: the ledger
+    sticks on `ping` while the device answers every direct query
+    (#1993). The sweep is the solicited re-ask the browser doesn't do:
+    a targeted `AsyncServiceInfo` resolve (cache first, wire fallback),
+    cheaper than the ICMP it replaces; on success `_apply_service_info`
+    claims mdns and the device leaves the ping rotation. Claims here
+    are **ownership repair, not liveness**: candidates must already be
+    ONLINE (never revive off the cache, #1776) and must have some cached
+    mDNS trace (an mDNS-dark deployment gains no multicast traffic). A
+    miss claims nothing; ICMP decides, same as the active-resolve path.
+    The browser `Removed` branch runs the same verify-resolve before
+    honouring the event, demoting only on a **confirmed miss** — so a
+    wake-from-suspend `Removed` storm or an OTA reboot doesn't flip
+    live devices OFFLINE. Latch guard: an mdns claim on an API device
+    **without a live PTR** (these resolves fetch SRV/TXT/A, not PTR)
+    has no `Removed` counterpart, so `should_ping` keeps it
+    sweep-eligible — the sweep is its offline-detection substitute
+    until the PTR returns and normal browser ownership resumes.
 
   Don't add an OFFLINE branch to the active-resolve path without
   re-reading this. The asymmetry is the only way to get aggressive ONLINE
   detection without flipping the indicator red on every quiet device.
+- **Persisted-IP revival is identity-gated** (`api_reviver.py`). A
+  stuck-offline `api:` device whose `.local` won't resolve and whose RAM
+  `ip_addresses` are gone (a confirmed mDNS `Removed`, or a restart) gets
+  one last-resort repair from the last-known `Device.ip` (RAM mirrors the
+  sidecar; a `Removed` clears only `ip_addresses`, #2029): ICMP first as
+  a *negative* filter (silence = no dial), then a single short-lived
+  Native API `device_info` dial, claiming ONLINE under the `ping` source
+  only when the reported name matches (MAC corroborates when both sides
+  know it). Never claim ONLINE off a bare ICMP reply at a persisted IP —
+  a stale DHCP lease answering is the #1776 latch class. A name mismatch
+  proves the IP stale and clears it through
+  `on_persisted_ip_invalidated` (the one path that drops a last-known
+  `Device.ip`, RAM and disk). A verified pair revives
+  dial-free only within `_VERIFIED_TTL`; a longer silent gap re-dials,
+  so a re-leased IP can't ride a weeks-old verification back to ONLINE.
+  Dials are capped per sweep with escalating backoff because API
+  connects occupy the ESP's scarce connection slots. ICMP-unavailable
+  deployments are deliberately
+  not repaired: the pre-filter can't run and a verify-only ONLINE would
+  be un-demotable.
 - **The `Device` is the source of truth, not the monitor.**
   `DeviceStateMonitor.apply_*` (state, ip, version, config_hash,
   api_encryption) dedupe by comparing the broadcast against every
@@ -735,7 +823,7 @@ When changing the sync script or catalog handling, watch for these:
 | `esphome_device_builder/definitions/platform_capabilities.index.json` | Generated; do not hand-edit. esphome platform metadata the long-lived process reads instead of importing `esphome.components.*` (download routing, wifi-inference no-wifi sets, static download-types). Loaded via `load_platform_capabilities_index`. |
 | `esphome_device_builder/helper_cli.py` (`device-builder-helper`) | Subprocess for `get_download_types` on build-dir-dependent platforms (libretiny/nrf52), so the child imports `esphome.components.<X>`, not the dashboard process. |
 | `script/update_board.py` | One-step contributor wrapper: regenerate one board's JSON (`sync_boards.py`) + validate (`validate_definitions.py`). Auto-detects the edited board, or takes an id. |
-| `script/sync_boards.py` | Regenerates the split board catalog from the manifests; stamps the generating `esphome_version` into `boards.index.json`. Takes an optional board id to regenerate just one (single-board mode guards installed `esphome` against that stamp). |
+| `script/sync_boards.py` | Regenerates the split board catalog from the manifests; stamps the generating `esphome_version` into `boards.index.json`. Takes an optional board id to regenerate just one. Both modes guard installed `esphome` against that stamp; `--restamp` opts a full sync out to regenerate against a new esphome. |
 | `script/sync_components.py` | Regenerates the component catalog + `platform_capabilities.index.json` |
 | `script/check_catalog.py` | Smoke test for popular components |
 | `script/check_import_time.py` | CI guard: fails if `import …device_builder` regresses past `script/import_time_budget.json` (e.g. a fresh eager `esphome.components.*` import) |
@@ -755,7 +843,10 @@ When changing the sync script or catalog handling, watch for these:
 - **Don't add `Co-Authored-By: Claude` to commits** in this repo.
 - **Don't bump the `esphome` dependency casually.** Dependabot ignores it
   for a reason — bumping needs a coordinated catalog re-sync against the
-  matching schema version. Do it deliberately at release time.
+  matching schema version. The catalog-sync workflow owns the bump: its
+  PR carries the regenerated catalog, the `esphome-constraints.txt` CI
+  pin, and (on stable releases) the pyproject floor via
+  `script/bump_esphome_floor.py`.
 - **Don't reorder existing public methods** without a reason. The
   controllers' API surface is the de-facto public interface for the
   frontend.

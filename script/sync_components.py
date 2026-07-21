@@ -45,13 +45,14 @@ import re
 import shutil
 import sys
 import textwrap
+import time
 import unicodedata
 import urllib.request
 import zipfile
 from collections.abc import Callable, Collection, Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
-from functools import cache, partial
+from functools import cache
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
@@ -95,6 +96,10 @@ _DOCS_INDEX_URL = (
 _DOCS_REPO_URL = "https://github.com/esphome/esphome.io.git"
 _DOCS_REPO_BRANCH = "current"
 _DOCS_CLONE_DIR = "esphome.io"
+_DOCS_INDEX_CACHE_NAME = "esphome.io-index.mdx"
+# The docs index is a moving target (new components land weekly), unlike
+# the version-keyed schema bundles which cache immutably.
+_DOCS_INDEX_MAX_AGE = 24 * 3600.0
 _IMAGE_BASE_URL = "https://esphome.io/images/"
 
 # CDN at schema.esphome.io rejects requests without a recognisable
@@ -513,6 +518,14 @@ _FIELD_OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
             },
         ],
     },
+    # ``api.actions`` (and its legacy ``services`` alias) is a list of
+    # named callable actions owned by the automations UI — the navigator
+    # lists them and ``<esphome-api-action-editor>`` edits each one. The
+    # generic nested form can't represent the named-list shape and would
+    # duplicate that surface, so hide both from the visual form (YAML
+    # completion still offers them).
+    ("api", "actions"): {"hidden": True},
+    ("api", "services"): {"hidden": True},
     # ``wifi.ap`` is wrapped in a custom validator (``wifi_network_ap``)
     # so the schema bundle drops the inner schema and types it as a
     # bare string. The actual YAML shape is a fallback access point
@@ -705,6 +718,19 @@ _FIELD_OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
     },
 }
 
+# Field paths whose live ``vol.Range`` max is derived from the machine
+# running the sync. ``esphome.compile_process_limit`` is
+# ``cv.int_range(min=1, max=get_usable_cpu_count())`` upstream, so the
+# walked bound is the sync runner's core count, not the user's compile
+# host, and churns between regens on different hardware. The wire
+# ``range`` is a closed pair with no min-only form, so these ship fully
+# unbounded; upstream validates against the real count at compile time.
+# Keyed on the bare introspection id (``stem if domain else top_key``),
+# so an entry for a platform stem applies across every domain sharing it.
+_MACHINE_DERIVED_RANGE_FIELDS: set[tuple[str, tuple[str, ...]]] = {
+    ("esphome", ("compile_process_limit",)),
+}
+
 # UART ``bus_constraints`` the schema can't express, filled into the captured
 # constraints (captured wins). Keyed by the catalog id whose "+ Add UART" detour
 # reads it. A scalar is a fixed rate; a list narrows the detour's baud combo box
@@ -786,12 +812,15 @@ class Visibility(StrEnum):
     member's string value is what the dumper emits, so
     ``raw["visibility"] == Visibility.ADVANCED`` works directly.
 
-    Two-tier strictness ordering: ``YAML_ONLY`` is strictly
-    stronger than ``ADVANCED``, which is strictly stronger than
-    no setting at all. The cascade pass below relies on that
-    ordering.
+    Strictness ordering: ``YAML_ONLY`` is strictly stronger than
+    ``ADVANCED``, which is strictly stronger than ``UI``
+    (esphome/esphome#17503, 2026.7.0b2), the least-hidden rung —
+    it pins the field to the main form over the consumer-side
+    heuristics, but not over the structural cascade (a field
+    inside an advanced parent block stays at-least advanced).
     """
 
+    UI = "ui"
     ADVANCED = "advanced"
     YAML_ONLY = "yaml_only"
 
@@ -935,7 +964,7 @@ def main() -> int:
     parser.add_argument(
         "--clean",
         action="store_true",
-        help="Wipe cached schemas before fetching.",
+        help="Wipe cached schemas and docs-derived caches before fetching.",
     )
     parser.add_argument(
         "--limit-component",
@@ -947,9 +976,8 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if args.clean and _CACHE_ROOT.exists():
-        for d in _CACHE_ROOT.glob("esphome-schema-*"):
-            shutil.rmtree(d)
+    if args.clean:
+        _clean_caches()
 
     version = args.version or resolve_latest_release(
         include_prereleases=args.include_prereleases,
@@ -1071,6 +1099,18 @@ def ensure_schema(version: str) -> Path:
         msg = f"Schema bundle layout unexpected — missing {schema_dir}"
         raise RuntimeError(msg)
     return schema_dir
+
+
+def _clean_caches() -> None:
+    """Wipe the cached schema bundles and the docs-derived caches."""
+    if not _CACHE_ROOT.exists():
+        return
+    for d in _CACHE_ROOT.glob("esphome-schema-*"):
+        shutil.rmtree(d)
+    (_CACHE_ROOT / _DOCS_INDEX_CACHE_NAME).unlink(missing_ok=True)
+    docs_clone = _CACHE_ROOT / _DOCS_CLONE_DIR
+    if docs_clone.exists():
+        shutil.rmtree(docs_clone)
 
 
 def _http_get(url: str, *, timeout: int = 30) -> bytes:
@@ -1313,6 +1353,11 @@ def build_catalog(
     # would suppress advanced-promotion of auto-loaded singleton refs. Platform
     # domains are unbounded YAML lists, so every platform entry is repeatable.
     _mark_platform_domains_multi_conf(out)
+
+    # Final pass over every description (schema- and MDX-derived alike): strip
+    # leaked fenced-code examples and dangling ``One of:`` list-introducers.
+    tidied = _tidy_all_descriptions(out)
+    _LOGGER.info("Tidied %d description(s): stripped code fences / dangling introducers", tidied)
 
     return out
 
@@ -1745,7 +1790,10 @@ def _is_truncated_prefix(existing: str, full: str) -> bool:
     """Whether *existing* is a mid-sentence (no terminal .!?:) leading slice of *full*."""
     # A trailing ``:`` is a list-introducer ("One of:") whose options live in MDX
     # sub-bullets the extractor skips, so joining yields garbage — leave it.
-    head = " ".join(existing.split())
+    # Schema ``docs`` keep markdown (`` `code` ``, ``[links]``) that the MDX
+    # ``full`` text has already flattened, so flatten the head too — else a
+    # truncated head carrying any markup never matches its fuller MDX text.
+    head = " ".join(_clean_description_text(existing).split())
     whole = " ".join(full.split())
     return (
         bool(head) and len(whole) > len(head) and whole.startswith(head) and head[-1] not in ".!?:"
@@ -1927,22 +1975,24 @@ def _parse_config_var_bullets(  # noqa: C901
     """Parse a flat ``- **name** (...): ...`` bullet list into a field map.
 
     One description per top-level bullet, joining indented continuation
-    prose, excluding nested sub-bullets, and stopping at block-quotes /
-    sub-headings. With *first_paragraph_only*, a blank line after the
-    first prose ends the field (drops trailing ``**Important:**`` notes).
+    prose, excluding nested sub-bullets (and their wrapped continuation
+    lines), and stopping at block-quotes / sub-headings. With
+    *first_paragraph_only*, a blank line after the first prose ends the
+    field (drops trailing ``**Important:**`` notes).
     """
     descriptions: dict[str, str] = {}
     current_key: str | None = None
     current_parts: list[str] = []
+    # Indent of the sub-bullet we're skipping, so its deeper-indented wrapped
+    # continuation lines are skipped too; None when not inside one.
+    sub_indent: int | None = None
 
     def commit() -> None:
         nonlocal current_key
         if current_key is None:
             return
         joined = " ".join(p for p in current_parts if p)
-        cleaned = _clean_description_text(joined).rstrip(" .,:")
-        if cleaned and cleaned[-1] not in ".!?":
-            cleaned += "."
+        cleaned = _ensure_terminal_period(_clean_description_text(joined).rstrip(" .,:"))
         if cleaned:
             descriptions[current_key] = cleaned
 
@@ -1953,6 +2003,7 @@ def _parse_config_var_bullets(  # noqa: C901
             commit()
             current_key = m.group("name")
             current_parts = [m.group("desc").strip()] if m.group("desc").strip() else []
+            sub_indent = None
             continue
         if current_key is None:
             continue
@@ -1963,16 +2014,28 @@ def _parse_config_var_bullets(  # noqa: C901
                 commit()
                 current_key = None
                 current_parts = []
+                sub_indent = None
             continue
         # Block-quotes / GitHub alerts and sub-headings end the field.
         if stripped.startswith((">", "#")):
             commit()
             current_key = None
             current_parts = []
+            sub_indent = None
             continue
-        # Sub-bullets describe sub-fields — skip.
+        # Sub-bullets describe sub-fields — skip, and remember their indent so
+        # their wrapped continuation lines (indented deeper) are skipped too.
+        # Only a genuinely nested (indented) bullet owns following prose; a
+        # top-level bullet must not swallow the field's own continuation.
         if stripped.startswith(("- ", "* ", "+ ")):
+            indent = len(line) - len(line.lstrip())
+            sub_indent = indent if indent > 0 else None
             continue
+        if sub_indent is not None:
+            if len(line) - len(line.lstrip()) > sub_indent:
+                continue
+            # Back at the parent indent — a trailing paragraph, not sub-bullet prose.
+            sub_indent = None
         current_parts.append(stripped)
 
     commit()
@@ -2258,6 +2321,108 @@ def _clean_description_text(text: str) -> str:
     return text
 
 
+def _ensure_terminal_period(text: str) -> str:
+    """Append ``.`` unless *text* already ends in sentence-terminating punctuation."""
+    if text and text[-1] not in ".!?":
+        return text + "."
+    return text
+
+
+_CODE_LANG = (
+    r"(?:yaml|yml|json|jsonc|c\+\+|cpp|c|python|py|bash|sh|shell|ini|toml|text|html|xml|cbp)"
+)
+# Optional prose that introduces a code example, shared by both fence patterns.
+# The whitespace runs are atomic (``(?>\s*)``) so a run before an unterminated
+# fence can't be re-partitioned into exponentially many ways (ReDoS guard).
+_CODE_FENCE_INTRO = r"(?>\s*)(?:for example|examples?|e\.g\.)?(?>\s*):?(?>\s*)"
+# A fenced code example: ```...``` (any body) or ``lang <body> ``. Only triple-fenced
+# or language-tagged spans match. The ``\s+`` after the language token requires a real
+# body, so inline ``code`` (double-backtick, no language) and an inline format-name
+# reference like ``json`` are both preserved.
+_CODE_FENCE_RE = re.compile(
+    _CODE_FENCE_INTRO + r"(?:`{3,}.*?`{3,}|``\s*" + _CODE_LANG + r"\s+.*?``)",
+    re.IGNORECASE | re.DOTALL,
+)
+# A trailing, unterminated fence whose body lived on excluded sub-lines.
+_CODE_FENCE_TAIL_RE = re.compile(
+    _CODE_FENCE_INTRO + r"(?:`{3,}|``\s*" + _CODE_LANG + r"\b)[^`]*$",
+    re.IGNORECASE,
+)
+# A trailing sentence that is just a list-introducer ending in ``:`` (its options
+# are sub-bullets the field extractor drops), or a bare "... one of." with no values.
+_LIST_INTRO_COLON_RE = re.compile(
+    r"(?:(?<=[.!?])\s+|^)"
+    r"(?:can be|must be|one of|any of|choose from|possible values?|valid values?|either|select from)\b"
+    r"[^.!?]{0,45}:\s*$",
+    re.IGNORECASE,
+)
+_BARE_ONE_OF_RE = re.compile(r"(?:(?<=[.!?])\s+|^)[^.!?]*\bone of\s*\.?\s*$", re.IGNORECASE)
+# Tail clean-up after a fence/introducer removal leaves stray spacing/punctuation.
+_SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([.,;:])")
+_REPEATED_TERMINATOR_RE = re.compile(r"([.!?])(?:\s*[.!?])+")
+_MULTI_SPACE_RE = re.compile(r"\s{2,}")
+
+
+def _collapse_terminators(match: re.Match[str]) -> str:
+    """Collapse a run of sentence terminators to one, but keep a literal ``...``."""
+    run = match.group(0)
+    return run if run == "..." else match.group(1)
+
+
+def _tidy_description(text: str) -> str:
+    """
+    Strip leaked fenced-code examples and dangling list-introducers.
+
+    Returns *text* unchanged when neither is present, so a real sentence
+    that happens to end in ``:`` keeps its colon.
+    """
+    if not text:
+        return text
+    # Collapse whitespace runs first. Real descriptions are already single-spaced
+    # (``clean_docs`` / the MDX parser normalize), so this is a no-op on them; it
+    # also bounds the fence regexes to linear time on a pathological long whitespace
+    # run (a multi-line unterminated fence under ``re.DOTALL``), which the atomic
+    # groups alone leave quadratic. A clean description is still returned verbatim
+    # via the ``changed`` guard below.
+    working = _MULTI_SPACE_RE.sub(" ", text)
+    tidied = _CODE_FENCE_RE.sub("", working)
+    tidied = _CODE_FENCE_TAIL_RE.sub("", tidied)
+    changed = tidied != working
+    prev: str | None = None
+    while prev != tidied:
+        prev = tidied
+        stripped = _LIST_INTRO_COLON_RE.sub("", tidied)
+        stripped = _BARE_ONE_OF_RE.sub("", stripped)
+        if stripped != tidied:
+            changed = True
+        tidied = stripped.rstrip()
+    if not changed:
+        return text
+    tidied = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", tidied)
+    tidied = _REPEATED_TERMINATOR_RE.sub(_collapse_terminators, tidied)
+    tidied = _MULTI_SPACE_RE.sub(" ", tidied).strip().rstrip(",;:-").strip()
+    tidied = _ensure_terminal_period(tidied)
+    return tidied or text
+
+
+def _tidy_all_descriptions(node: object) -> int:
+    """Run ``_tidy_description`` over every ``description`` in the catalog tree."""
+    count = 0
+    if isinstance(node, dict):
+        desc = node.get("description")
+        if isinstance(desc, str):
+            tidied = _tidy_description(desc)
+            if tidied != desc:
+                node["description"] = tidied
+                count += 1
+        for value in node.values():
+            count += _tidy_all_descriptions(value)
+    elif isinstance(node, list):
+        for item in node:
+            count += _tidy_all_descriptions(item)
+    return count
+
+
 def load_image_map() -> dict[str, str]:
     """Parse the docs ``components/index.mdx`` for image URLs.
 
@@ -2270,19 +2435,29 @@ def load_image_map() -> dict[str, str]:
     where ``component_id`` matches our catalog ids (qualified with
     ``<domain>.<id>`` for platform-providing components).
 
-    No ImagesMap if the docs file can't be fetched — image_url stays
+    Cached under ``.cache/`` for ``_DOCS_INDEX_MAX_AGE`` — the index gains
+    rows between releases, so a bare exists() cache silently dropped
+    ``image_url`` for newer components (#2053). No ImagesMap if the docs
+    file can't be fetched and no cached copy exists — image_url stays
     empty for every component.
     """
-    cache_file = _CACHE_ROOT / "esphome.io-index.mdx"
+    cache_file = _CACHE_ROOT / _DOCS_INDEX_CACHE_NAME
     cache_file.parent.mkdir(parents=True, exist_ok=True)
-    if not cache_file.exists():
+    stale = (
+        not cache_file.exists() or time.time() - cache_file.stat().st_mtime > _DOCS_INDEX_MAX_AGE
+    )
+    if stale:
         try:
             cache_file.write_bytes(_http_get(_DOCS_INDEX_URL))
         except Exception:
+            if not cache_file.exists():
+                _LOGGER.warning(
+                    "Could not fetch docs index page — image URLs will be empty",
+                )
+                return {}
             _LOGGER.warning(
-                "Could not fetch docs index page — image URLs will be empty",
+                "Could not refresh docs index page — using the stale cached copy",
             )
-            return {}
 
     text = cache_file.read_text(errors="ignore")
     pattern = re.compile(
@@ -2345,6 +2520,34 @@ def build_entries_from_file(
     return out
 
 
+def _assemble_dependencies(
+    meta: dict[str, Any],
+    config_entries: list[dict[str, Any]],
+    domain: str,
+    stem: str,
+    top_key: str,
+) -> list[str]:
+    """
+    Merge a component's catalog ``dependencies`` in priority order.
+
+    Schema DEPENDENCIES, own-hub use_id ref, referenced buses, AUTO_LOAD
+    closure deps; transport-implicit deps drop last.
+    """
+    dependencies = list(meta.get("dependencies") or [])
+    if domain and stem not in dependencies and _references_own_hub(config_entries, stem):
+        dependencies.append(stem)
+    for bus in sorted(_referenced_buses(config_entries)):
+        if bus not in dependencies:
+            dependencies.append(bus)
+    for dep in _auto_loaded_dependencies(domain, stem if domain else top_key):
+        if dep not in dependencies:
+            dependencies.append(dep)
+    implicit = _implicit_dependencies()
+    if implicit:
+        dependencies = [d for d in dependencies if d not in implicit]
+    return dependencies
+
+
 def build_component_entry(
     top_key: str,
     section: dict,
@@ -2386,31 +2589,7 @@ def build_component_entry(
 
     meta = _lookup_index_meta(component_id, top_key, index)
     docs = clean_docs(meta.get("docs"))
-    dependencies = list(meta.get("dependencies") or [])
-
-    # Package-style platforms (ld2410/button, pipsolar/sensor, ...) bind
-    # their hub through a ``cv.use_id`` config var instead of upstream
-    # ``DEPENDENCIES``, so the schema index ships them dependency-less
-    # and the frontend never prompts for the hub. The use_id cross-ref
-    # is already extracted as ``references_component``; union the
-    # entry's own hub back in.
-    if domain and stem not in dependencies and _references_own_hub(config_entries, stem):
-        dependencies.append(stem)
-
-    # A device that cross-references a bus hub (``spi_id`` / ``i2c_id`` /
-    # ``uart_id``) needs that bus block to exist; ESPHome enforces it at config
-    # time but doesn't always list it in ``DEPENDENCIES`` (atm90e32, max6675,
-    # i2c touchscreens), so the schema index ships them bus-less and the
-    # frontend never prompts to add the bus. Union the referenced bus back in.
-    for bus in sorted(_referenced_buses(config_entries)):
-        if bus not in dependencies:
-            dependencies.append(bus)
-
-    # Drop deps the chosen networking transport will auto-load. See
-    # ``_implicit_dependencies``.
-    implicit = _implicit_dependencies()
-    if implicit:
-        dependencies = [d for d in dependencies if d not in implicit]
+    dependencies = _assemble_dependencies(meta, config_entries, domain, stem, top_key)
 
     # Narrow esphome introspection — adds multi_conf, platform_defaults,
     # supported_platforms, and refined types (boolean/float/...) the
@@ -3070,10 +3249,9 @@ def _convert_field(  # noqa: PLR0912, PLR0915, C901
     # wired to what.
     is_structural = entry_type == "pin" or bool(references)
     # Schema-author UI hint from upstream esphome
-    # (esphome/esphome#16267): the dumper emits ``"visibility":
-    # "advanced" | "yaml_only"`` for fields whose ``cv.Optional`` /
-    # ``cv.Required`` set ``visibility=Visibility.ADVANCED`` or
-    # ``=Visibility.YAML_ONLY``. Absent → fall back to the name-based
+    # (esphome/esphome#16267, #17503): the dumper emits ``"visibility":
+    # "ui" | "advanced" | "yaml_only"`` for fields whose ``cv.Optional`` /
+    # ``cv.Required`` set a ``Visibility``. Absent → fall back to the name-based
     # heuristic (the long tail of fields the schema doesn't yet
     # annotate; as upstream adoption grows the heuristic rules out
     # of ``_classify_advanced`` can shrink toward zero).
@@ -3085,9 +3263,12 @@ def _convert_field(  # noqa: PLR0912, PLR0915, C901
     # pass walks the resulting tree and pushes parent strictness
     # down where descendants would otherwise be more visible.
     schema_visibility = raw.get("visibility")
-    advanced = schema_visibility == Visibility.ADVANCED or _classify_advanced(
-        key, required=required, is_structural=is_structural
-    )
+    if schema_visibility == Visibility.UI:
+        advanced = False
+    else:
+        advanced = schema_visibility == Visibility.ADVANCED or _classify_advanced(
+            key, required=required, is_structural=is_structural
+        )
     yaml_only = schema_visibility == Visibility.YAML_ONLY
     # Sub-sensor readings on multi-sensor platforms (DHT temperature /
     # humidity, debug.sensor's free / block / loop_time / ..., ADS1115's
@@ -3101,7 +3282,12 @@ def _convert_field(  # noqa: PLR0912, PLR0915, C901
         advanced = False
 
     default_value, gated_component = _extract_default(raw, key=key)
-    if key in _PLATFORM_DEFAULTED_ADVANCED_KEYS and default_value is not None and not required:
+    if (
+        key in _PLATFORM_DEFAULTED_ADVANCED_KEYS
+        and default_value is not None
+        and not required
+        and schema_visibility != Visibility.UI
+    ):
         advanced = True
     entry: dict[str, Any] = {
         "key": key,
@@ -3602,18 +3788,73 @@ def _build_id_entry(key: str, raw: dict, *, required: bool = False) -> dict:
     }
 
 
-def _build_options(raw: dict) -> list[dict] | None:
-    """Build a list of ``{label, value}`` dicts from a schema's enum values."""
+# The three upstream default-marker idioms: a trailing ``*(default)*``,
+# a leading ``(Default)``, or docs that are nothing but ``Default``.
+_DEFAULT_MARKER_RE = re.compile(
+    r"\s*\*\(default\)\*\s*$|^\(default\)[\s:.]*|^\(?default\)?\.?$", re.IGNORECASE
+)
+
+
+def _split_default_marker(docs: str) -> tuple[str, bool]:
+    """Strip any default-marker idiom, reporting whether one was present."""
+    docs = docs.strip()
+    stripped = _DEFAULT_MARKER_RE.sub("", docs).strip()
+    return stripped, stripped != docs
+
+
+# Docs longer than a dropdown row can't work as a label even without
+# terminal punctuation (truncated upstream docstrings hit this).
+_MAX_OPTION_LABEL_LENGTH = 60
+
+
+def _is_sentence_docs(docs: str) -> bool:
+    """Whether *docs* reads as sentence prose rather than an option label."""
+    docs = docs.rstrip()
+    return len(docs) > _MAX_OPTION_LABEL_LENGTH or docs.endswith((".", "!", "?"))
+
+
+def _enum_default(raw: dict) -> str | None:
+    """Resolve the schema-marked default among an enum's values."""
     values = raw.get("values")
     if not isinstance(values, dict):
         return None
+    for value, info in values.items():
+        if isinstance(info, dict) and (
+            info.get("default") or _split_default_marker(info.get("docs") or "")[1]
+        ):
+            return value
+    return None
+
+
+def _build_options(raw: dict) -> list[dict] | None:
+    """
+    Build a list of ``{label, value[, description]}`` dicts from a schema's enum values.
+
+    Label-like docs replace the label; sentence prose lands in
+    ``description``.
+    """
+    values = raw.get("values")
+    if not isinstance(values, dict):
+        return None
+    stripped_docs = {
+        value: _split_default_marker(info["docs"])[0]
+        for value, info in values.items()
+        if isinstance(info, dict) and info.get("docs")
+    }
+    # Classify per enum, not per value: one sentence-styled sibling means
+    # the docs are prose, and a menu mixing value labels with docs labels
+    # is wrong either way (sensor.pid's ERROR vs its sibling terms).
+    demote_all = any(_is_sentence_docs(docs) for docs in stripped_docs.values())
     options: list[dict] = []
     for value, info in values.items():
         label = value or "(none)"
         option = {"label": label, "value": value}
         if isinstance(info, dict):
-            if info.get("docs"):
-                option["label"] = info["docs"]
+            if docs := stripped_docs.get(value, ""):
+                if demote_all:
+                    option["description"] = _clean_description_text(docs)
+                else:
+                    option["label"] = docs
             # variant_enum: each value carries the variants that accept it;
             # lowercase to match the board catalog ``esphome.variant`` form.
             if variants := info.get("variants"):
@@ -3639,8 +3880,9 @@ def _coerce_default(value: Any) -> Any:
 def _extract_default(raw: dict, key: str = "") -> tuple[Any, str | None]:
     """Resolve ``(default_value, depends_on_component)`` for a field.
 
-    Reads ``default_with`` (``cv.OnlyWith``, esphome/esphome#16276)
-    in preference to plain ``default``. ``default_without``
+    Precedence: ``default_with`` (``cv.OnlyWith``,
+    esphome/esphome#16276), then plain ``default``, then an enum
+    value marked default (:func:`_enum_default`). ``default_without``
     (``cv.OnlyWithout``) has inverse-gate semantics that
     ``depends_on_component`` can't model — no default surfaces for
     those fields. Multi-component ``default_with`` picks the first
@@ -3658,7 +3900,10 @@ def _extract_default(raw: dict, key: str = "") -> tuple[Any, str | None]:
                 components[0],
             )
         return _coerce_default(gated.get("value")), components[0] if components else None
-    return _coerce_default(raw.get("default")), None
+    default = _coerce_default(raw.get("default"))
+    if default is None:
+        default = _enum_default(raw)
+    return default, None
 
 
 def _reference_namespace(qualified: str) -> str | None:
@@ -4359,6 +4604,54 @@ def _resolve_auto_load(raw_auto_load: Any) -> list[str]:
     return list(raw_auto_load) if isinstance(raw_auto_load, list) else []
 
 
+@cache
+def _auto_loaded_dependencies(domain: str, stem_or_key: str) -> tuple[str, ...]:
+    """
+    ``DEPENDENCIES`` contributed by a component's ``AUTO_LOAD`` closure.
+
+    ``AUTO_LOAD`` lives on the platform manifest for ``<domain>.<stem>``
+    entries and on the component manifest for bare ones. The auto-loaded
+    components themselves are always present so they never become
+    dependencies; only what *they* require does. Empty when ``esphome``
+    isn't importable.
+    """
+    loader = _get_esphome_loader()
+    if loader is None:
+        return ()
+
+    def _manifest(name: str, *, platform_of: str = "") -> Any:
+        try:
+            if platform_of:
+                return loader.get_platform(platform_of, name)
+            return loader.get_component(name)
+        except Exception as exc:
+            _LOGGER.debug("auto-load closure: can't load %s: %s", name, exc)
+            return None
+
+    root = _manifest(stem_or_key, platform_of=domain)
+    if root is None:
+        return ()
+    collected: list[str] = []
+    seen: set[str] = set()
+    queue = [name for name in _resolve_auto_load(root.auto_load) if isinstance(name, str)]
+    while queue:
+        current = queue.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        manifest = _manifest(current)
+        if manifest is None:
+            continue
+        collected.extend(
+            dep for dep in getattr(manifest, "dependencies", None) or [] if isinstance(dep, str)
+        )
+        queue.extend(
+            name for name in _resolve_auto_load(manifest.auto_load) if isinstance(name, str)
+        )
+    # A dep that is itself auto-loaded is always present — never a dependency.
+    return tuple(dict.fromkeys(dep for dep in collected if dep and dep not in seen))
+
+
 def introspect_component(component_id: str) -> dict[str, Any]:
     """
     Return ``{multi_conf, is_target_platform, platform_defaults, refined_types, auto_load}``.
@@ -4410,7 +4703,9 @@ def introspect_component(component_id: str) -> dict[str, Any]:
 
     refined_types = merge_from_platforms(_collect_refined_types)
     platform_constraints = merge_from_platforms(_collect_platform_constraints)
-    field_ranges = merge_from_platforms(_collect_field_ranges)
+    field_ranges = _drop_machine_derived_ranges(
+        component_id, merge_from_platforms(_collect_field_ranges)
+    )
     inclusive_groups = merge_from_platforms(_collect_inclusive_groups)
     required_groups = merge_from_platforms(_collect_required_groups)
     list_fields = merge_from_platforms(_collect_list_fields)
@@ -5228,6 +5523,62 @@ def _extract_validator_units(validator: Any) -> list[str] | None:
     ]
 
 
+# What a unit symbol embedded in a suffix-strip validator may look like:
+# short, no whitespace, unit charset only ("steps/s", "steps/s^2").
+_SUFFIX_UNIT_RE = re.compile(r"^[A-Za-z°µΩ%][A-Za-z0-9°µΩ%/^*()]{0,15}$")
+
+
+def _derive_suffix_units(validator: Any) -> list[str] | None:
+    """
+    Units of a hand-rolled ``"<float> <unit>"`` suffix validator, else None.
+
+    Recovers what the closure introspection and ``cv.<name>`` tables can't
+    see (stepper's ``validate_speed``). Every accepted spelling ships,
+    tuple order (canonical) first, so any YAML spelling still parses.
+    """
+    code = getattr(validator, "__code__", None)
+    if code is None:
+        return None
+    # Suffix candidates survive in the code constants. The const-tuple gate
+    # is what keeps this pass from calling arbitrary unclassified validators.
+    candidates = [
+        s
+        for const in code.co_consts
+        if isinstance(const, tuple)
+        for s in const
+        if isinstance(s, str) and _SUFFIX_UNIT_RE.match(s)
+    ]
+    # A validator that accepts arbitrary text would pass every suffix probe;
+    # require it to reject an unknown unit before trusting any acceptance.
+    if not candidates or _probe_number(validator, "5nosuchunitxyz") is not None:
+        return None
+    bare = _probe_number(validator, "5")
+    units: list[str] = []
+    for unit in dict.fromkeys(candidates):
+        with_unit = _probe_number(validator, f"5{unit}")
+        if with_unit is None:
+            continue
+        # A suffix that rescales the bare form (as5600's "5°" → raw counts)
+        # is a conversion, not a display unit. When the bare form doesn't
+        # parse there is no bare YAML to misdisplay, so the magnitude gate
+        # applies only when both forms do.
+        if bare is not None and bare != with_unit:
+            return None
+        units.append(unicodedata.normalize(_UNIT_NORMALIZATION, unit))
+    return units or None
+
+
+def _probe_number(validator: Any, text: str) -> float | None:
+    """``validator(text)`` as a float, or ``None`` when it raises or returns non-numeric."""
+    try:
+        result = validator(text)
+    except Exception:
+        return None
+    if isinstance(result, (int, float)) and not isinstance(result, bool):
+        return float(result)
+    return None
+
+
 def _validator_branches_dict_and_list(src: str) -> bool:
     """Report whether *src* tests both ``isinstance(_, dict)`` and ``isinstance(_, list)``."""
     try:
@@ -5358,6 +5709,11 @@ def _collect_refined_types(  # noqa: C901
         for k, t in by_name.items():
             if k in name:
                 return t
+        # Last resort: component-local suffix strippers (stepper's
+        # ``validate_speed``) that no table can bind (#2056).
+        units = _derive_suffix_units(validator)
+        if units:
+            return RefinedType("float_with_unit", unit_options=units)
         return None
 
     def visit(_key: Any, _key_name: str, val: Any, path: tuple[str, ...]) -> None:
@@ -5875,9 +6231,39 @@ def _apply_refined_types(
             if not entry.get("config_entries"):
                 entry["type"] = "unknown"
         elif entry.get("type") == "string":
-            entry["type"] = new_type.type
+            if new_type.type == "boolean" and entry.get("options"):
+                _merge_boolean_union_options(entry)
+            else:
+                entry["type"] = new_type.type
 
     _walk_catalog_entries(entries, visit)
+
+
+def _merge_boolean_union_options(entry: dict) -> None:
+    """Fold a boolean refinement into an options entry instead of retyping it.
+
+    A ``cv.Any(cv.boolean, cv.one_of(...))`` union reaches the schema bundle
+    as an enum of only the non-boolean values (``zigbee.wipe_on_boot``'s
+    ``once``); surface ``true``/``false`` as options beside them so the
+    dropdown can express every accepted value.
+    """
+    options = entry.get("options") or []
+    present = {str(option.get("value")).lower() for option in options}
+    entry["options"] = [
+        {"label": literal, "value": literal}
+        for literal in ("true", "false")
+        if literal not in present
+    ] + options
+    if isinstance(entry.get("default_value"), bool):
+        literal = "true" if entry["default_value"] else "false"
+        entry["default_value"] = next(
+            (
+                option["value"]
+                for option in entry["options"]
+                if str(option.get("value")).lower() == literal
+            ),
+            literal,
+        )
 
 
 def _apply_typed_defaults(
@@ -5994,14 +6380,11 @@ def _logger_uart_platform_options() -> dict[str, list[dict[str, str]]]:
 
     A custom ``uart_selection`` validator gates the set, so the schema bundle
     can't carry it; introspected from ``UART_SELECTION_*`` and keyed via the
-    shared ``variant_to_key`` so lookups hit. Empty when esphome's logger
-    isn't importable; other failures propagate to fail the build loudly.
+    shared ``variant_to_key`` so lookups hit. Failures propagate to fail the
+    sync loudly.
     """
-    try:
-        from esphome.components import logger as _logger
-    except ImportError:
-        _LOGGER.warning("esphome logger not importable — hardware_uart combobox skipped")
-        return {}
+    from esphome.components import logger as _logger
+
     out: dict[str, list[dict[str, str]]] = {}
 
     def add(raw_key: str, values: list[str]) -> None:
@@ -6040,19 +6423,10 @@ def _ethernet_type_platform_options() -> dict[str, list[dict[str, str]]]:
     """
     Ethernet's per-platform ``type`` choices from the live module constants.
 
-    The schema bundle ships a flat union; empty when esphome's ethernet
-    isn't importable or predates the split.
+    The schema bundle ships a flat union.
     """
-    try:
-        from esphome.components import ethernet as _ethernet
-    except ImportError:
-        _LOGGER.warning("esphome ethernet not importable — type platform split skipped")
-        return {}
-    if not hasattr(_ethernet, "RP2_ETHERNET_TYPES"):
-        # Catalog syncs always run on 2026.7+; this only keeps test runs
-        # under an older interpreter (CI stable leg) from crashing.
-        _LOGGER.debug("installed esphome predates RP2_ETHERNET_TYPES — ethernet split skipped")
-        return {}
+    from esphome.components import ethernet as _ethernet
+
     rp2 = set(_ethernet.RP2_ETHERNET_TYPES)
     # Everything except the RP2-only chips.
     esp32 = set(_ethernet.ETHERNET_TYPES) - (rp2 - set(_ethernet.SPI_ETHERNET_TYPES))
@@ -6110,22 +6484,17 @@ def _psram_config_entries() -> list[dict]:
     """
     Synthesize psram's structured editor from its ``CONFIG_SCHEMA``.
 
-    Prefers the static schema, where a variant enum exposes its
-    ``{value: [variants]}`` map via ``SCHEMA_EXTRACT``; falls back to the older
-    ``get_config_schema`` callable that builds a different schema per ESP32
-    variant. Empty when esphome isn't importable.
+    A variant enum exposes its ``{value: [variants]}`` map via
+    ``SCHEMA_EXTRACT``.
     """
-    try:
-        from esphome.components import psram as _psram
-    except ImportError:
-        _LOGGER.warning("esphome psram not importable — structured editor skipped")
-        return []
-    fields = _psram_static_fields(_psram.CONFIG_SCHEMA) or _psram_callable_fields(_psram)
+    from esphome.components import psram as _psram
+
+    fields = _psram_static_fields(_psram.CONFIG_SCHEMA)
     return _sort_entries([_psram_entry(name, field) for name, field in fields.items()])
 
 
 def _psram_static_fields(config_schema: Any) -> dict[str, dict[str, Any]]:
-    """Per-field map from a static psram schema, or empty if it isn't extractable."""
+    """Per-field map from psram's static ``CONFIG_SCHEMA``."""
     fields: dict[str, dict[str, Any]] = {}
 
     def visit(key: Any, name: str, validator: Any, path: tuple[str, ...]) -> None:
@@ -6139,9 +6508,7 @@ def _psram_static_fields(config_schema: Any) -> dict[str, dict[str, Any]]:
             field["options"][value] = [v.lower() for v in variants]
 
     _walk_schema_keys(config_schema, visit)
-    # Empty unless this was the static form: the old callable schema isn't
-    # walkable, so it yields no options and the caller falls back to it.
-    return fields if any(field["options"] for field in fields.values()) else {}
+    return fields
 
 
 def _variant_enum_map(validator: Any) -> dict[str, list[str]]:
@@ -6158,53 +6525,9 @@ def _variant_enum_map(validator: Any) -> dict[str, list[str]]:
     return {}
 
 
-def _psram_callable_fields(_psram: Any) -> dict[str, dict[str, Any]]:
-    """Per-field map from the older per-variant ``get_config_schema`` callable.
-
-    Feed each variant in and capture the built ``vol.Schema`` (a one-shot subclass
-    whose ``__call__`` returns itself), unioning options / defaults across variants.
-    """
-
-    class _Capture(vol.Schema):
-        def __call__(self, data: Any) -> Any:
-            return self
-
-    fields: dict[str, dict[str, Any]] = {}
-    original_schema = _psram.cv.Schema
-    _psram.cv.Schema = _Capture
-    try:
-        for variant, modes in _psram.SPIRAM_MODES.items():
-            record = partial(_record_psram_field, fields, variant)
-            with _esp32_variant_context(variant):
-                _walk_schema_keys(_psram.get_config_schema({"mode": modes[0]}), record)
-    finally:
-        _psram.cv.Schema = original_schema
-    return fields
-
-
 def _psram_field(fields: dict[str, dict[str, Any]], key: Any, name: str) -> dict[str, Any]:
     """Get or create the per-key accumulator (default, is-bool, options)."""
     return fields.setdefault(name, {"default": _psram_default(key), "bool": False, "options": {}})
-
-
-def _record_psram_field(
-    fields: dict[str, dict[str, Any]],
-    variant: str,
-    key: Any,
-    name: str,
-    validator: Any,
-    path: tuple[str, ...],
-) -> None:
-    """Fold one captured schema key into *fields*, tagging each option's *variant*."""
-    if len(path) != 1 or name == "id":
-        return
-    field = _psram_field(fields, key, name)
-    if getattr(validator, "__name__", "") == "boolean":
-        field["bool"] = True
-    for option in _psram_one_of_options(validator):
-        variants = field["options"].setdefault(option, [])
-        if (low := variant.lower()) not in variants:
-            variants.append(low)
 
 
 def _psram_default(key: Any) -> Any:
@@ -6214,25 +6537,6 @@ def _psram_default(key: Any) -> Any:
         return None
     value = default() if callable(default) else default
     return None if value is vol.UNDEFINED else value
-
-
-def _psram_one_of_options(validator: Any) -> list[str | int]:
-    """
-    Read a ``cv.one_of`` validator's accepted values out of its closure.
-
-    Depends on ``cv.one_of``'s closure layout; the unioned-options tests pin
-    it, so an upstream refactor breaks CI rather than silently dropping the
-    options (the select would degrade to a free-text field).
-    """
-    for cell in getattr(validator, "__closure__", None) or ():
-        value = cell.cell_contents
-        if (
-            isinstance(value, (tuple, list))
-            and value
-            and all(isinstance(item, (str, int)) for item in value)
-        ):
-            return list(value)
-    return []
 
 
 def _psram_entry(name: str, field: dict[str, Any]) -> dict:
@@ -6484,7 +6788,9 @@ def _load_unit_of_measurement_options() -> list[dict[str, str]]:
             if name.startswith("UNIT_") and isinstance(getattr(const, name), str)
         }
     )
-    return [{"label": v, "value": v} for v in raw]
+    # UNIT_EMPTY ("") would render as a blank row; the cleared combobox
+    # already means "no unit".
+    return [{"label": v, "value": v} for v in raw if v]
 
 
 _UNIT_OF_MEASUREMENT_OPTIONS: list[dict[str, str]] = _load_unit_of_measurement_options()
@@ -7082,6 +7388,26 @@ def _collect_field_ranges(
 
     _walk_schema_keys(schema, visit)
     return out
+
+
+def _drop_machine_derived_ranges(
+    component_id: str,
+    field_ranges: dict[tuple[str, ...], tuple[int | float, int | float]],
+) -> dict[tuple[str, ...], tuple[int | float, int | float]]:
+    """Strip bounds the sync runner's hardware chose (``_MACHINE_DERIVED_RANGE_FIELDS``)."""
+    denylisted = {path for owner, path in _MACHINE_DERIVED_RANGE_FIELDS if owner == component_id}
+    if not denylisted:
+        return field_ranges
+    for path in denylisted - field_ranges.keys():
+        # Same staleness posture as the disjoint-range warning: surface
+        # a curated entry upstream no longer justifies.
+        _LOGGER.warning(
+            "machine-derived range entry %s.%s no longer walks a bound; "
+            "drop it from _MACHINE_DERIVED_RANGE_FIELDS",
+            component_id,
+            ".".join(path),
+        )
+    return {path: bounds for path, bounds in field_ranges.items() if path not in denylisted}
 
 
 def _platform_field_keys(platform_manifests: list[Any]) -> set[tuple[str, ...]]:

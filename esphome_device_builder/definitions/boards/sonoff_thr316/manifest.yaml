@@ -30,7 +30,7 @@ pins:
   occupied_by: switch_led
 - gpio: 21
   available: false
-  occupied_by: $friendly_name
+  occupied_by: Sonoff THR316
 - gpio: 25
   available: false
   occupied_by: one_wire.gpio
@@ -52,19 +52,13 @@ featured_components:
       value: 0
       locked: true
     internal: true
+    filters:
+      value:
+      - invert: null
+      - delayed_off: 10ms
+      locked: true
     id: reset
     name: reset
-- id: climate_control
-  component_id: climate.thermostat
-  fields:
-    min_heating_off_time: 5s
-    min_heating_run_time: 5s
-    min_idle_time: 5s
-    heat_deadband: 2
-    default_preset: Home
-    sensor: temp
-    id: climate_control
-    name: $friendly_name Climate Control
 - id: switch_led
   component_id: light.status_led
   fields:
@@ -103,7 +97,7 @@ featured_components:
   fields:
     update_interval: 60s
     id: sensor_wifi_signal_1
-    name: $friendly_name Wifi RSSI
+    name: Sonoff THR316 Wifi RSSI
 - id: uptime_sensor
   component_id: sensor.uptime
   fields:
@@ -115,7 +109,7 @@ featured_components:
   fields:
     index: 0
     id: temp
-    name: $friendly_name Temperature
+    name: Sonoff THR316 Temperature
   requires:
   - one_wire_bus
 - id: relay
@@ -126,7 +120,7 @@ featured_components:
       locked: true
     restore_mode: RESTORE_DEFAULT_OFF
     id: relay
-    name: $friendly_name
+    name: Sonoff THR316
 - id: sensor_power
   component_id: switch.gpio
   fields:
@@ -136,16 +130,9 @@ featured_components:
     restore_mode: ALWAYS_ON
     id: sensor_power
     name: sensor_power
-featured_bundles:
-- id: climate_control_setup
-  name: $friendly_name Climate Control (full setup)
-  component_ids:
-  - one_wire_bus
-  - temp
-  - climate_control
 source:
   type: esphome-devices
   remote_id: Sonoff-THR316
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Sonoff-THR316/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: a3614e703d23aeb669975b754a6aaeb79d820cc2804cd2663ee2ebd1ffa49472

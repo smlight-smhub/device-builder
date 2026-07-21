@@ -18,10 +18,10 @@ pins:
   occupied_by: blue_led
 - gpio: 13
   available: false
-  occupied_by: Button
+  occupied_by: Geekbes YM-WS-1 Plug Button
 - gpio: 15
   available: false
-  occupied_by: relay
+  occupied_by: Geekbes YM-WS-1 Plug
 docs_url: https://devices.esphome.io/devices/Geekbes-YM-WS-1/
 featured_components:
 - id: binary_sensor_gpio_1
@@ -30,8 +30,15 @@ featured_components:
     pin:
       value: 13
       locked: true
+    filters:
+      value:
+      - invert: null
+      - delayed_on: 100ms
+      - delayed_off: 100ms
+      - delayed_on_off: 100ms
+      locked: true
     id: binary_sensor_gpio_1
-    name: Button
+    name: Geekbes YM-WS-1 Plug Button
 - id: relay
   component_id: switch.gpio
   fields:
@@ -39,7 +46,7 @@ featured_components:
       value: 15
       locked: true
     id: relay
-    name: relay
+    name: Geekbes YM-WS-1 Plug
 - id: blue_led
   component_id: switch.gpio
   fields:
@@ -54,5 +61,5 @@ source:
   type: esphome-devices
   remote_id: Geekbes-YM-WS-1
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Geekbes-YM-WS-1/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: aa985c3aee8aad4cea8dc52e65e5bdc1ce42ec188f5e0d18a96f4a15ca899872

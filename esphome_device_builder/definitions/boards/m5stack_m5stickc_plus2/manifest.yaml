@@ -38,13 +38,13 @@ pins:
   occupied_by: mic
 - gpio: 37
   available: false
-  occupied_by: Button A
+  occupied_by: M5StickC PLUS2 Button A
 - gpio: 38
   available: false
   occupied_by: Battery Voltage
 - gpio: 39
   available: false
-  occupied_by: Button B
+  occupied_by: M5StickC PLUS2 Button B
 docs_url: https://devices.esphome.io/devices/M5Stack-M5StickC-PLUS2/
 product_url: https://docs.m5stack.com/en/core/M5StickC%20PLUS2
 featured_components:
@@ -82,7 +82,7 @@ featured_components:
         inverted: false
       locked: true
     id: binary_sensor_gpio_1
-    name: Button A
+    name: M5StickC PLUS2 Button A
 - id: binary_sensor_gpio_2
   component_id: binary_sensor.gpio
   fields:
@@ -92,19 +92,19 @@ featured_components:
         inverted: true
       locked: true
     id: binary_sensor_gpio_2
-    name: Button B
+    name: M5StickC PLUS2 Button B
 - id: led1
   component_id: light.monochromatic
   fields:
     output: builtin_led
     id: led1
-    name: Led
+    name: M5StickC PLUS2 Led
 - id: display_bl
   component_id: light.monochromatic
   fields:
     output: backlight
     id: display_bl
-    name: Backlight
+    name: M5StickC PLUS2 Backlight
 - id: mic
   component_id: microphone.i2s_audio
   fields:
@@ -154,6 +154,10 @@ featured_components:
       locked: true
     attenuation: 12db
     update_interval: 60s
+    filters:
+      value:
+      - multiply: 2.0
+      locked: true
     id: sensor_adc_1
     name: Battery Voltage
 - id: sensor_mpu6886_1
@@ -162,16 +166,19 @@ featured_components:
     address: 104
     update_interval: 10s
     id: sensor_mpu6886_1
+    i2c_id:
+      value: bus_a
+      locked: true
   requires:
   - bus_a
 featured_bundles:
 - id: led1_setup
-  name: Led (full setup)
+  name: M5StickC PLUS2 Led (full setup)
   component_ids:
   - builtin_led
   - led1
 - id: display_bl_setup
-  name: Backlight (full setup)
+  name: M5StickC PLUS2 Backlight (full setup)
   component_ids:
   - backlight
   - display_bl
@@ -179,5 +186,5 @@ source:
   type: esphome-devices
   remote_id: M5Stack-M5StickC-PLUS2
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/M5Stack-M5StickC-PLUS2/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 6f1fcd1ba1bc92f794b370c4b5f4982381d1f8428305767f314b0b87b3cf3a68

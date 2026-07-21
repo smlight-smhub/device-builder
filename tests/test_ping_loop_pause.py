@@ -11,7 +11,7 @@ sweeping unconditionally — bug). Pins:
 * with a wired ``SubscriberPresence``, ``_ping_loop`` parks
   before the sweep until the first subscriber arrives
 * the 0→1 subscriber transition wakes the loop within one
-  scheduling tick — no waiting for ``_PING_INTERVAL``
+  scheduling tick — no waiting out the sweep interval
 * the 1→0 transition lets the next iteration park again so a
   burst of disconnects doesn't keep ICMP looping
 """
@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Callable
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -28,20 +27,21 @@ import pytest
 
 from esphome_device_builder import device_builder as device_builder_module
 from esphome_device_builder.controllers._device_state_monitor import DeviceStateMonitor
-from esphome_device_builder.controllers._device_state_monitor import ping as ping_module
 from esphome_device_builder.controllers._device_state_monitor import shared as shared_module
 from esphome_device_builder.controllers._device_state_monitor._state import MonitorState
 from esphome_device_builder.controllers._device_state_monitor.ping import PingSource
 from esphome_device_builder.device_builder import DeviceBuilder
 from esphome_device_builder.helpers.subscriber_presence import SubscriberPresence
 
+from .conftest import running_task, wait_until
+
 
 def _build_monitor(presence: SubscriberPresence | None) -> DeviceStateMonitor:
     """Bypass __init__ — ``PingSource.run`` only touches a few attrs."""
     monitor = DeviceStateMonitor.__new__(DeviceStateMonitor)
     monitor.state = MonitorState()
-    monitor._presence = presence
-    monitor._ping = PingSource(monitor)
+    monitor.presence = presence
+    monitor.ping = PingSource(monitor)
     return monitor
 
 
@@ -63,29 +63,20 @@ def _instrument_loop(
     async def _sweep() -> None:
         counts["sweeps"] += 1
 
-    # ``resolve_non_api_mdns_targets`` is a free function in ``shared``;
-    # patch the module attribute so ``PingSource.run``'s call sees the
-    # stub. ``_ping_sweep`` is a method on ``PingSource``; replace it
-    # on the per-test instance.
+    # The resolve steps are free functions in ``shared``; patch the
+    # module attributes so ``PingSource.run``'s calls see the stubs.
+    # ``_ping_sweep`` is a method on ``PingSource``; replace it on the
+    # per-test instance.
     monkeypatch.setattr(shared_module, "resolve_non_api_mdns_targets", _resolve)
-    monitor._ping._ping_sweep = _sweep  # type: ignore[method-assign]
+    monkeypatch.setattr(shared_module, "resolve_api_mdns_targets", _resolve)
+    monitor.ping._ping_sweep = _sweep  # type: ignore[method-assign]
 
     # Skip the bootstrap delay; collapse the post-sweep idle wait
     # so the loop ticks fast enough for an asyncio.sleep(0)-driven
     # spin. Tests cancel the task to exit cleanly.
-    monkeypatch.setattr(ping_module, "_PING_BOOTSTRAP_DELAY", 0)
-    monkeypatch.setattr(ping_module, "_PING_INTERVAL", 0.001)
+    monkeypatch.setattr(PingSource, "_bootstrap_delay", 0)
+    monkeypatch.setattr(PingSource, "_interval", 0.001)
     return counts
-
-
-async def _drive_until(condition: Callable[[], object], *, timeout: float = 0.5) -> None:
-    """Wait for *condition()* to become truthy or raise on timeout."""
-
-    async def _spin() -> None:
-        while not condition():
-            await asyncio.sleep(0)
-
-    await asyncio.wait_for(_spin(), timeout=timeout)
 
 
 async def test_ping_loop_runs_unconditionally_without_presence(
@@ -101,16 +92,69 @@ async def test_ping_loop_runs_unconditionally_without_presence(
     monitor = _build_monitor(presence=None)
     counts = _instrument_loop(monitor, monkeypatch)
 
-    task = asyncio.create_task(monitor._ping.run())
-    try:
-        await _drive_until(lambda: counts["sweeps"] >= 2)
-    finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+    async with running_task(monitor.ping.run()):
+        await wait_until(lambda: counts["sweeps"] >= 2, 0.5, "two sweeps")
 
     assert counts["sweeps"] >= 2
     assert counts["resolves"] >= 2
+
+
+async def test_ping_loop_survives_a_raising_resolve_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising resolve step is logged and the loop keeps sweeping."""
+    monitor = _build_monitor(presence=None)
+    counts = _instrument_loop(monitor, monkeypatch)
+
+    async def _boom(_monitor: DeviceStateMonitor) -> None:
+        raise AttributeError("boom")
+
+    monkeypatch.setattr(shared_module, "resolve_api_mdns_targets", _boom)
+
+    async with running_task(monitor.ping.run()):
+        await wait_until(lambda: counts["sweeps"] >= 2, 0.5, "two sweeps")
+
+    assert counts["sweeps"] >= 2
+
+
+async def test_ping_loop_survives_a_raising_ping_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crashing sweep body is logged and the loop keeps sweeping."""
+    monitor = _build_monitor(presence=None)
+    counts = _instrument_loop(monitor, monkeypatch)
+
+    async def _flaky_sweep() -> None:
+        counts["sweeps"] += 1
+        if counts["sweeps"] == 1:
+            raise RuntimeError("boom")
+
+    monitor.ping._ping_sweep = _flaky_sweep  # type: ignore[method-assign]
+
+    async with running_task(monitor.ping.run()):
+        await wait_until(lambda: counts["sweeps"] >= 2, 0.5, "two sweeps")
+
+    assert counts["sweeps"] >= 2
+
+
+async def test_ping_loop_does_not_mask_child_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled resolve step propagates instead of being logged as a step failure."""
+    monitor = _build_monitor(presence=None)
+    counts = _instrument_loop(monitor, monkeypatch)
+
+    async def _cancelled(_monitor: DeviceStateMonitor) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(shared_module, "resolve_api_mdns_targets", _cancelled)
+
+    task = asyncio.create_task(monitor.ping.run())
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.5)
+
+    assert task.done()
+    assert counts["sweeps"] == 0
 
 
 async def test_ping_loop_parks_until_first_subscriber(
@@ -127,8 +171,7 @@ async def test_ping_loop_parks_until_first_subscriber(
     monitor = _build_monitor(presence=presence)
     counts = _instrument_loop(monitor, monkeypatch)
 
-    task = asyncio.create_task(monitor._ping.run())
-    try:
+    async with running_task(monitor.ping.run()):
         # Give the loop several scheduling ticks to confirm it
         # actually parks instead of running. Without the gate fix
         # ``_ping_sweep`` would have fired on the first tick.
@@ -138,11 +181,7 @@ async def test_ping_loop_parks_until_first_subscriber(
 
         # 0→1 transition must wake the loop within one scheduling tick.
         with presence.subscriber():
-            await _drive_until(lambda: counts["sweeps"] >= 1)
-    finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+            await wait_until(lambda: counts["sweeps"] >= 1, 0.5, "a sweep")
 
     assert counts["sweeps"] >= 1
 
@@ -161,11 +200,10 @@ async def test_ping_loop_pauses_again_after_last_subscriber_leaves(
     monitor = _build_monitor(presence=presence)
     counts = _instrument_loop(monitor, monkeypatch)
 
-    task = asyncio.create_task(monitor._ping.run())
-    try:
+    async with running_task(monitor.ping.run()):
         # Cycle one subscriber in, drive at least one sweep, then out.
         with presence.subscriber():
-            await _drive_until(lambda: counts["sweeps"] >= 1)
+            await wait_until(lambda: counts["sweeps"] >= 1, 0.5, "a sweep")
         sweeps_at_disconnect = counts["sweeps"]
 
         # After disconnect, give the loop several ticks. The count
@@ -174,10 +212,6 @@ async def test_ping_loop_pauses_again_after_last_subscriber_leaves(
         # parks at the gate on the next iteration.
         for _ in range(20):
             await asyncio.sleep(0)
-    finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
 
     # At most one extra sweep can land — the one already past the
     # gate when the subscriber dropped. Anything more means the gate
@@ -224,7 +258,7 @@ async def test_subscriber_arrival_mid_idle_bails_within_a_tick(
 ) -> None:
     """A subscriber arriving while the loop is in idle drives the next sweep promptly.
 
-    With ``_PING_INTERVAL`` re-stretched to 60s, anything beyond a
+    With the sweep interval re-stretched to 60s, anything beyond a
     handful of scheduling ticks for the second sweep means the
     0→1 wake didn't fire — the loop sat through the rest of the
     interval instead.
@@ -232,19 +266,14 @@ async def test_subscriber_arrival_mid_idle_bails_within_a_tick(
     presence = SubscriberPresence()
     monitor = _build_monitor(presence=presence)
     counts = _instrument_loop(monitor, monkeypatch)
-    monkeypatch.setattr(ping_module, "_PING_INTERVAL", 60)
+    monkeypatch.setattr(PingSource, "_interval", 60)
 
-    task = asyncio.create_task(monitor._ping.run())
-    try:
+    async with running_task(monitor.ping.run()):
         with presence.subscriber():
-            await _drive_until(lambda: counts["sweeps"] >= 1)
+            await wait_until(lambda: counts["sweeps"] >= 1, 0.5, "a sweep")
         sweeps_after_a = counts["sweeps"]
 
         with presence.subscriber():
-            await _drive_until(lambda: counts["sweeps"] > sweeps_after_a)
-    finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+            await wait_until(lambda: counts["sweeps"] > sweeps_after_a, 0.5, "a fresh sweep")
 
     assert counts["sweeps"] >= sweeps_after_a + 1

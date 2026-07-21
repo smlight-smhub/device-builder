@@ -108,6 +108,12 @@ featured_components:
     num_leds: 1
     chipset: SK6812
     restore_mode: RESTORE_AND_OFF
+    color_correct:
+      value:
+      - 20%
+      - 20%
+      - 20%
+      locked: true
     id: id_led
     name: LED
 - id: enable
@@ -127,8 +133,9 @@ featured_components:
 - id: sensor_scd4x_1
   component_id: sensor.scd4x
   fields:
+    altitude_compensation: 0m
     address: 98
-    update_interval: $sensor_interval
+    update_interval: 60s
     id: sensor_scd4x_1
   requires:
   - bus_a
@@ -142,10 +149,16 @@ featured_components:
 - id: sen55
   component_id: sensor.sen5x
   fields:
+    temperature_compensation:
+      value:
+        offset: -3.0
+        normalized_offset_slope: 0
+        time_constant: 1200
+      locked: true
     acceleration_mode: low
     store_baseline: true
     address: 105
-    update_interval: $sensor_interval
+    update_interval: 60s
     id: sen55
   requires:
   - bus_a
@@ -153,5 +166,5 @@ source:
   type: esphome-devices
   remote_id: M5Stack-AirQ
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/M5Stack-AirQ/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 6c48045b8b8337fe2fa0faa419997bf8eda2f2a667e9117e8b99bf29205ccc97

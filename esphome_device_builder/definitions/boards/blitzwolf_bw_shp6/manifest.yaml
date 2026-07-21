@@ -24,10 +24,13 @@ pins:
   occupied_by: sensor.hlw8012
 - gpio: 13
   available: false
-  occupied_by: button
+  occupied_by: shp6 button
+- gpio: 14
+  available: false
+  occupied_by: sensor.hlw8012
 - gpio: 15
   available: false
-  occupied_by: Relay
+  occupied_by: shp6 Relay
 docs_url: https://devices.esphome.io/devices/BlitzWolf-BW-SHP6/
 featured_components:
 - id: button
@@ -39,7 +42,7 @@ featured_components:
         inverted: true
       locked: true
     id: button
-    name: button
+    name: shp6 button
 - id: led
   component_id: output.gpio
   fields:
@@ -61,16 +64,14 @@ featured_components:
     cf_pin:
       value: 5
       locked: true
+    cf1_pin:
+      value: 14
+      locked: true
+    current_resistor: '0.00290'
+    voltage_divider: '940'
     change_mode_every: 4
     update_interval: 10s
     id: sensor_hlw8012_1
-- id: sensor_total_daily_energy_1
-  component_id: sensor.total_daily_energy
-  fields:
-    unit_of_measurement: kWh
-    accuracy_decimals: 5
-    id: sensor_total_daily_energy_1
-    name: daily energy
 - id: relay
   component_id: switch.gpio
   fields:
@@ -79,10 +80,10 @@ featured_components:
       locked: true
     restore_mode: RESTORE_DEFAULT_OFF
     id: relay
-    name: Relay
+    name: shp6 Relay
 source:
   type: esphome-devices
   remote_id: BlitzWolf-BW-SHP6
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/BlitzWolf-BW-SHP6/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 4e9549c9b58ad5fbdbef3544e86906895707867d206e55265d5dfec595ed7b20

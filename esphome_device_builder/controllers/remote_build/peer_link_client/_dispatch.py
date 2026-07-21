@@ -28,7 +28,6 @@ from ....models import (
     OffloaderPeerLinkClosedData,
     OffloaderPeerLinkOpenedData,
     OffloaderQueueStatusChangedData,
-    SubmitJobAckFrameData,
 )
 from .._client_models import DownloadArtifactsError, DownloadArtifactsResult
 
@@ -43,7 +42,8 @@ _LOGGER = logging.getLogger(__name__)
 # way it does for every shared frame schema in the project.
 # Optional fields (``*FrameData.reason``) live outside the schema
 # — dispatchers read via ``frame.get("reason")`` post-validate.
-_SUBMIT_JOB_ACK_SCHEMA = frame_schema({"job_id": str, "accepted": bool})
+# One shape serves both ``submit_job_ack`` and ``reset_build_env_ack``.
+_JOB_ACK_SCHEMA = frame_schema({"job_id": str, "accepted": bool})
 
 _JOB_STATE_CHANGED_SCHEMA = frame_schema({"job_id": str, "status": str, "error_message": str})
 
@@ -127,15 +127,31 @@ def dispatch_queue_status(client: PeerLinkClient, parsed: dict[str, Any]) -> Non
 
 def dispatch_submit_job_ack(client: PeerLinkClient, parsed: dict[str, Any]) -> None:
     """Resolve the matching ack future for an inbound ``submit_job_ack`` frame."""
-    if not is_valid_frame(_SUBMIT_JOB_ACK_SCHEMA, parsed):
-        log_malformed(client, "submit_job_ack", parsed)
+    _resolve_job_ack(client, parsed, acks=client._submit_job_acks, frame_type="submit_job_ack")
+
+
+def dispatch_reset_build_env_ack(client: PeerLinkClient, parsed: dict[str, Any]) -> None:
+    """Resolve the matching ack future for an inbound ``reset_build_env_ack`` frame."""
+    _resolve_job_ack(client, parsed, acks=client._reset_env_acks, frame_type="reset_build_env_ack")
+
+
+def _resolve_job_ack(
+    client: PeerLinkClient,
+    parsed: dict[str, Any],
+    *,
+    acks: dict[str, Any],
+    frame_type: str,
+) -> None:
+    """Validate a ``{job_id, accepted, reason?}`` ack frame and resolve its future."""
+    if not is_valid_frame(_JOB_ACK_SCHEMA, parsed):
+        log_malformed(client, frame_type, parsed)
         return
     job_id = cast(str, parsed["job_id"])
-    ack_fut = client._submit_job_acks.get(job_id)
+    ack_fut = acks.get(job_id)
     if ack_fut is None or ack_fut.done():
         _LOGGER.debug(
-            "peer-link client dropping submit_job_ack from %s:%d "
-            "(job_id=%r, has_future=%s, done=%s)",
+            "peer-link client dropping %s from %s:%d (job_id=%r, has_future=%s, done=%s)",
+            frame_type,
             client._hostname,
             client._port,
             job_id,
@@ -144,11 +160,7 @@ def dispatch_submit_job_ack(client: PeerLinkClient, parsed: dict[str, Any]) -> N
         )
         return
     accepted = cast(bool, parsed["accepted"])
-    ack: SubmitJobAckFrameData = {
-        "type": "submit_job_ack",
-        "job_id": job_id,
-        "accepted": accepted,
-    }
+    ack: dict[str, Any] = {"type": frame_type, "job_id": job_id, "accepted": accepted}
     # Preserve the typed shape: ``reason`` is NotRequired and only
     # carries content on ``accepted=False``. Spurious ``reason`` on
     # accept is off-contract; drop it (logged at debug).
@@ -156,9 +168,10 @@ def dispatch_submit_job_ack(client: PeerLinkClient, parsed: dict[str, Any]) -> N
     if isinstance(reason, str):
         if accepted:
             _LOGGER.debug(
-                "peer-link client dropping spurious reason=%r on accepted ack "
+                "peer-link client dropping spurious reason=%r on accepted %s "
                 "from %s:%d (job_id=%r)",
                 reason,
+                frame_type,
                 client._hostname,
                 client._port,
                 job_id,
@@ -307,7 +320,13 @@ def dispatch_artifacts_end(client: PeerLinkClient, parsed: dict[str, Any]) -> No
 
 
 def fire_opened(
-    client: PeerLinkClient, *, esphome_version: str = "", auto_provision_supported: bool = False
+    client: PeerLinkClient,
+    *,
+    esphome_version: str = "",
+    auto_provision_supported: bool = False,
+    friendly_name: str = "",
+    ha_addon: bool = False,
+    reset_build_env_supported: bool = False,
 ) -> None:
     """Fire ``OFFLOADER_PEER_LINK_OPENED`` for a session that reached intent_response=ok."""
     payload: OffloaderPeerLinkOpenedData = {
@@ -316,6 +335,9 @@ def fire_opened(
         "pin_sha256": client._pin_sha256,
         "esphome_version": esphome_version,
         "auto_provision_supported": auto_provision_supported,
+        "friendly_name": friendly_name,
+        "ha_addon": ha_addon,
+        "reset_build_env_supported": reset_build_env_supported,
     }
     client._bus.fire(EventType.OFFLOADER_PEER_LINK_OPENED, payload)
 

@@ -12,7 +12,7 @@ images:
 pins:
 - gpio: 0
   available: false
-  occupied_by: Reset Button
+  occupied_by: magichome5ch Reset Button
 - gpio: 5
   available: false
   occupied_by: cold_white_channel
@@ -39,17 +39,19 @@ featured_components:
         inverted: true
       locked: true
     id: button
-    name: Reset Button
-- id: device_name
+    name: magichome5ch Reset Button
+- id: magichome5ch
   component_id: light.rgbww
   fields:
+    cold_white_color_temperature: 6536 K
+    warm_white_color_temperature: 2000 K
     red: red_channel
     green: green_channel
     blue: blue_channel
     cold_white: cold_white_channel
     warm_white: warm_white_channel
-    id: device_name
-    name: Rgbww 1
+    id: magichome5ch
+    name: Magic Home RGB/WW/CW
 - id: red_channel
   component_id: output.esp8266_pwm
   fields:
@@ -86,18 +88,18 @@ featured_components:
       locked: true
     id: warm_white_channel
 featured_bundles:
-- id: device_name_setup
-  name: Rgbww (full setup)
+- id: magichome5ch_setup
+  name: Magic Home RGB/WW/CW (full setup)
   component_ids:
   - red_channel
   - green_channel
   - blue_channel
   - cold_white_channel
   - warm_white_channel
-  - device_name
+  - magichome5ch
 source:
   type: esphome-devices
   remote_id: LEDENET-Smart-WiFi-RGB-WW-CW
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/LEDENET-Smart-WiFi-RGB-WW-CW/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 6023899b51b6ec76f58bebb99e4cec328a76f72506eec73091a910aed8079cbc

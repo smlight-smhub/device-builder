@@ -57,6 +57,20 @@ featured_components:
     chipset: WS2812
     num_leds: 40
     rgb_order: RBG
+    effects:
+      value:
+      - random: null
+      - pulse: null
+      - strobe: null
+      - flicker: null
+      - addressable_rainbow: null
+      - addressable_color_wipe: null
+      - addressable_scan: null
+      - addressable_twinkle: null
+      - addressable_random_twinkle: null
+      - addressable_fireworks: null
+      - addressable_flicker: null
+      locked: true
     id: color_light
     name: Color Light
 - id: output_cw
@@ -84,5 +98,5 @@ source:
   type: esphome-devices
   remote_id: LSC-Smart-Connect-XXL-LED-Stripe-10Meter-v1.1
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/LSC-Smart-Connect-XXL-LED-Stripe-10Meter-v1.1/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: bf88529865c3a10917618f0a0c3cacb7d9f17abdc76ff4b7bc10f098c42d6981

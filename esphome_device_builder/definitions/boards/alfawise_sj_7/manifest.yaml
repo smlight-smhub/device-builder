@@ -12,30 +12,28 @@ images:
 - https://raw.githubusercontent.com/esphome/devices.esphome.io/main/src/docs/devices/Alfawise-SJ-7/lovelace_card_example.png
 docs_url: https://devices.esphome.io/devices/Alfawise-SJ-7/
 featured_components:
-- id: name_fan
-  component_id: fan.speed
-  fields:
-    speed_count: 2
-    id: name_fan
-    name: Fan
 - id: sensor_uptime_1
   component_id: sensor.uptime
   fields:
     unit_of_measurement: d
     update_interval: 300s
     accuracy_decimals: 1
+    filters:
+      value:
+      - multiply: 1.1574e-05
+      locked: true
     id: sensor_uptime_1
-    name: uptime
+    name: alfawise uptime
 - id: sensor_wifi_signal_1
   component_id: sensor.wifi_signal
   fields:
     update_interval: 60s
     accuracy_decimals: 0
     id: sensor_wifi_signal_1
-    name: signal
+    name: alfawise signal
 source:
   type: esphome-devices
   remote_id: Alfawise-SJ-7
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Alfawise-SJ-7/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 837539f03a867cf41efd58de05a5e4cb27e25c2b1887bb8efd2fe55444cdf3ff

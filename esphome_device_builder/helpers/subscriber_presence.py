@@ -41,11 +41,7 @@ class SubscriberPresence:
 
     def __init__(self) -> None:
         self._count = 0
-        # Both events kept in lockstep with the count so consumers
-        # can ``await`` either transition.
         self._has_subscriber = asyncio.Event()
-        self._no_subscribers = asyncio.Event()
-        self._no_subscribers.set()  # initial state: gate is closed
         self._subscriber_callbacks: list[Callable[[], None]] = []
 
     def has_subscribers(self) -> bool:
@@ -66,31 +62,29 @@ class SubscriberPresence:
         """
         await self._has_subscriber.wait()
 
-    def add_subscriber_callback(self, callback: Callable[[], None]) -> None:
-        """Register *callback* to fire synchronously on every count 0→1 transition."""
-        self._subscriber_callbacks.append(callback)
+    def add_subscriber_callback(self, callback: Callable[[], None]) -> Callable[[], None]:
+        """
+        Register *callback* to fire synchronously on every count 0→1 transition.
 
-    async def wait_for_no_subscribers(self) -> None:
-        """Suspend until the count drops to 0 (mirror of :meth:`wait_for_subscriber`)."""
-        await self._no_subscribers.wait()
+        Returns an unsubscribe callable for consumers with a shorter
+        lifetime than the gate (per-broker MQTT monitors).
+        """
+        self._subscriber_callbacks.append(callback)
+        return lambda: self._subscriber_callbacks.remove(callback)
 
     @contextmanager
     def subscriber(self) -> Iterator[None]:
         """
         Context manager that increments the count for its body.
 
-        The 0→1 transition sets ``_has_subscriber`` and clears
-        ``_no_subscribers`` so any awaiter on
-        :meth:`wait_for_subscriber` resumes; the 1→0 transition
-        does the inverse and wakes any awaiter on
-        :meth:`wait_for_no_subscribers`. The count is decremented
-        in ``finally`` so the gate closes even if the wrapped
-        body raises.
+        The 0→1 transition sets ``_has_subscriber`` so any awaiter
+        on :meth:`wait_for_subscriber` resumes; the 1→0 transition
+        re-arms the gate. The count is decremented in ``finally``
+        so the gate closes even if the wrapped body raises.
         """
         self._count += 1
         if self._count == 1:
             self._has_subscriber.set()
-            self._no_subscribers.clear()
             for callback in self._subscriber_callbacks:
                 # Isolate so a misbehaving consumer can't break
                 # presence accounting or skip sibling callbacks.
@@ -104,4 +98,3 @@ class SubscriberPresence:
             self._count -= 1
             if self._count == 0:
                 self._has_subscriber.clear()
-                self._no_subscribers.set()

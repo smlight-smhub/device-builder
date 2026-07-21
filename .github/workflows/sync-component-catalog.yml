@@ -52,23 +52,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+      - name: Set up uv and Python 3.14
+        uses: ./.github/actions/setup-uv-python
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
-      - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
-        with:
-          enable-cache: true
-
-      - name: Install package (with esphome extra)
+      - name: Create venv + install package (with esphome extra)
         # ``[esphome]`` pulls in the esphome package so the narrow
         # introspection in sync_components (multi_conf,
         # platform_defaults, supported_platforms, type refinement)
-        # can run. ``--system`` installs into the setup-python
-        # interpreter, matching the rest of CI.
-        run: uv pip install --system -e '.[esphome]'
+        # can run. The venv bin dir goes on PATH so the bare
+        # ``python script/...`` steps below resolve to it.
+        run: |
+          uv venv
+          uv pip install -e '.[esphome]'
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Resolve schema version
         id: version
@@ -116,7 +114,7 @@ jobs:
         # its wheel), introspecting a beta schema with a stale esphome
         # would regress the catalog. Better a red nightly that retries
         # than a degraded catalog proposed for merge.
-        run: uv pip install --system --prerelease=allow "esphome==${{ steps.version.outputs.version }}"
+        run: uv pip install --prerelease=allow "esphome==${{ steps.version.outputs.version }}"
 
       - name: Run sync_components
         run: python script/sync_components.py --version "${{ steps.version.outputs.version }}"
@@ -127,7 +125,10 @@ jobs:
         # version, so re-stamp boards against the same esphome the align step
         # pinned; otherwise the Test job's ``sync-boards`` pre-commit hook
         # re-stamps it and the opened PR lands red on every esphome patch.
-        run: python script/sync_boards.py
+        # ``--restamp`` because the installed esphome is the freshly-resolved
+        # one while the committed stamp is still the previous version — the
+        # one caller for which that mismatch is the point.
+        run: python script/sync_boards.py --restamp
 
       - name: Validate definitions
         # Re-validate every board (curated + imported) against the JSON Schema
@@ -147,6 +148,21 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: sed -i "s/^esphome==.*/esphome==$VERSION/" esphome-constraints.txt
 
+      - name: Bump esphome floor
+        id: floor
+        # The catalog is generated against one esphome version and the sync
+        # scripts refuse a mismatched install, so once the catalog moves to a
+        # stable release, older esphome versions no longer actually work —
+        # raise the pyproject floor in the same PR. The script skips
+        # prereleases and never lowers the floor. Its one-line summary goes
+        # into the PR body so the reviewer sees the floor moved.
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          floor=$(python script/bump_esphome_floor.py "$VERSION")
+          echo "floor: $floor"
+          echo "summary=$floor" >> "$GITHUB_OUTPUT"
+
       - name: Smoke-test catalog
         # Catches regressions in popular components (missing fields,
         # type flips, id-vs-reference confusion). Runs BEFORE the
@@ -165,6 +181,7 @@ jobs:
               esphome_device_builder/definitions/board_bodies/ \
               esphome_device_builder/definitions/featured_components.index.json \
               esphome-constraints.txt \
+              pyproject.toml \
             && [ -z "$(git ls-files --others --exclude-standard esphome_device_builder/definitions/components/ esphome_device_builder/definitions/board_bodies/)" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -307,6 +324,7 @@ jobs:
             Automated catalog refresh.
 
             Schema source: **${{ steps.version.outputs.source }}** (version `${{ steps.version.outputs.version }}`).
+            Dependency floor: **${{ steps.floor.outputs.summary }}**.
             Triggered by: **${{ github.event_name == 'schedule' && 'nightly schedule' || format('manual dispatch by @{0}', github.actor) }}**.
 
             ${{ steps.diff.outputs.summary }}

@@ -22,6 +22,7 @@ from .helpers.network_interfaces import (
     ensure_single_host_for_ephemeral_port,
     resolve_bind_host,
 )
+from .models import EventType, RemoteBuildListenerChangedData
 
 if TYPE_CHECKING:
     from .device_builder import DeviceBuilder
@@ -65,6 +66,8 @@ class RemoteBuildLifecycle:
         # ``/remote-build/peer-link`` (issue #106). Bound only when
         # ``RemoteBuildSettings.enabled`` is true; ``None`` otherwise.
         self._runner: web.AppRunner | None = None
+        # Bound peer-link port; ``None`` whenever ``_runner`` is.
+        self._bound_port: int | None = None
         # Serialises listener-state mutations so two clients
         # toggling ``set_settings`` (or a ``rotate_identity`` racing a
         # toggle) can't interleave their teardown + rebind sequences.
@@ -76,6 +79,11 @@ class RemoteBuildLifecycle:
     def is_listener_bound(self) -> bool:
         """True iff the remote-build peer-link Noise WS listener is currently bound."""
         return self._runner is not None
+
+    @property
+    def listener_port(self) -> int | None:
+        """The bound peer-link port, or ``None`` while the listener is down."""
+        return self._bound_port
 
     async def maybe_start(self) -> None:
         """
@@ -159,6 +167,7 @@ class RemoteBuildLifecycle:
             )
             return
         self._runner = runner
+        self._bound_port = port
 
         # Update the mDNS advertise AFTER the bind succeeds. If the
         # bind raised (port in use, permission denied, ...) the
@@ -169,6 +178,7 @@ class RemoteBuildLifecycle:
             pin_sha256=identity.pin_sha256,
             remote_build_port=port,
         )
+        self._fire_listener_changed()
 
         _LOGGER.info(
             "Remote-build peer-link site listening on %s:%d (peer-link pin %s)",
@@ -304,6 +314,7 @@ class RemoteBuildLifecycle:
                 return
             old_runner = self._runner
             self._runner = None
+            self._bound_port = None
             await self._cleanup_runner(old_runner)
 
     def _get_lock(self) -> asyncio.Lock:
@@ -311,6 +322,17 @@ class RemoteBuildLifecycle:
         if self._lifecycle_lock is None:
             self._lifecycle_lock = asyncio.Lock()
         return self._lifecycle_lock
+
+    def _fire_listener_changed(self) -> None:
+        """Broadcast the advertised pairing address after a bind / teardown."""
+        self._db.bus.fire(
+            EventType.REMOTE_BUILD_LISTENER_CHANGED,
+            RemoteBuildListenerChangedData(
+                listener_host=self._db.remote_build_listener_host,
+                listener_addresses=self._db.remote_build_listener_addresses,
+                listener_port=self._bound_port,
+            ),
+        )
 
     async def _teardown_runner(self) -> None:
         """
@@ -329,11 +351,13 @@ class RemoteBuildLifecycle:
             return
         old_runner = self._runner
         self._runner = None
+        self._bound_port = None
         await self._cleanup_runner(old_runner)
         await self.publish_advertise(
             pin_sha256=None,
             remote_build_port=None,
         )
+        self._fire_listener_changed()
 
     @staticmethod
     async def _cleanup_runner(runner: web.AppRunner) -> None:

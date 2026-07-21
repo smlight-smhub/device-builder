@@ -42,7 +42,8 @@ from esphome_device_builder.controllers.remote_build import (
 from esphome_device_builder.device_builder import DeviceBuilder
 from esphome_device_builder.helpers.dashboard_advertise import DashboardAdvertiser
 from esphome_device_builder.helpers.dashboard_identity import rotate_identity
-from esphome_device_builder.helpers.event_bus import EventBus
+from esphome_device_builder.helpers.event_bus import Event, EventBus
+from esphome_device_builder.models import EventType, RemoteBuildListenerChangedData
 
 from .conftest import MakeSettingsFactory
 from .conftest import RemoteBuildTestHandles as RemoteBuildController
@@ -296,14 +297,22 @@ async def test_is_listener_bound_tracks_runner_and_teardown_is_noop_when_unbound
 
     assert lifecycle.is_listener_bound is False
     assert db.is_remote_build_listener_bound is False
+    # No advertiser attached → no advertised address to report.
+    assert db.remote_build_listener_host is None
+    assert db.remote_build_listener_addresses == []
 
     # Teardown with no runner bound is a no-op and never touches mDNS.
     advertiser = MagicMock()
     advertiser.refresh = AsyncMock()
+    advertiser.hostname = "esphome-builder-test.local"
+    advertiser.addresses = ["192.168.1.9"]
     db._dashboard_advertiser = advertiser
     await lifecycle._teardown_runner()
     advertiser.set_pin_sha256.assert_not_called()
     advertiser.set_remote_build_port.assert_not_called()
+    # With an advertiser attached the accessors pass its values through.
+    assert db.remote_build_listener_host == "esphome-builder-test.local"
+    assert db.remote_build_listener_addresses == ["192.168.1.9"]
 
     lifecycle._runner = MagicMock()
     assert lifecycle.is_listener_bound is True
@@ -340,7 +349,12 @@ async def test_maybe_start_remote_build_site_updates_advertiser_on_success(
     fake_advertiser.set_pin_sha256 = MagicMock()
     fake_advertiser.set_remote_build_port = MagicMock()
     fake_advertiser.refresh = AsyncMock()
+    fake_advertiser.hostname = "esphome-builder-test.local"
+    fake_advertiser.addresses = ["192.168.1.9"]
     db._dashboard_advertiser = fake_advertiser
+
+    events: list[Event[RemoteBuildListenerChangedData]] = []
+    db.bus.add_listener(EventType.REMOTE_BUILD_LISTENER_CHANGED, events.append)
 
     try:
         await db._remote_build_lifecycle.maybe_start()
@@ -348,6 +362,19 @@ async def test_maybe_start_remote_build_site_updates_advertiser_on_success(
         # Pin and listener port both made it to the advertiser.
         assert fake_advertiser.set_pin_sha256.called
         assert fake_advertiser.set_remote_build_port.called
+        # The bound port is also exposed for the identity view, and the
+        # advertised-address event carries the same values.
+        advertised_port = fake_advertiser.set_remote_build_port.call_args.args[0]
+        assert db.remote_build_listener_port == advertised_port
+        assert [e.data["listener_port"] for e in events] == [advertised_port]
+        # The event carries the full advertised address, not just the port.
+        assert events[0].data["listener_host"] == fake_advertiser.hostname
+        assert events[0].data["listener_addresses"] == fake_advertiser.addresses
+
+        # Teardown clears the port and broadcasts the change.
+        await db._remote_build_lifecycle._teardown_runner()
+        assert db.remote_build_listener_port is None
+        assert [e.data["listener_port"] for e in events] == [advertised_port, None]
         # ``refresh`` was awaited so the TXT change actually
         # leaves the local cache.
         assert fake_advertiser.refresh.called
@@ -498,6 +525,8 @@ async def test_maybe_start_remote_build_site_advertises_actual_port_for_ephemera
     fake_advertiser.set_pin_sha256 = MagicMock()
     fake_advertiser.set_remote_build_port = MagicMock()
     fake_advertiser.refresh = AsyncMock()
+    fake_advertiser.hostname = "esphome-builder-test.local"
+    fake_advertiser.addresses = ["192.168.1.9"]
     db._dashboard_advertiser = fake_advertiser
 
     try:

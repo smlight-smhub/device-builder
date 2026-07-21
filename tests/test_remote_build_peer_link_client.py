@@ -34,6 +34,9 @@ from aiohttp import WSMessage, WSMsgType, web
 from aiohttp.test_utils import TestServer, get_unused_port_socket
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from noise.exceptions import NoiseInvalidMessage
+from zeroconf import Zeroconf
+from zeroconf.asyncio import AsyncZeroconf
+from zeroconf.const import _TYPE_A
 
 from esphome_device_builder.api.ws import init_ws_app
 from esphome_device_builder.controllers.remote_build import (
@@ -53,6 +56,7 @@ from esphome_device_builder.controllers.remote_build.peer_link import (
 from esphome_device_builder.controllers.remote_build.peer_link_client import (
     DownloadArtifactsError,
     DownloadArtifactsResult,
+    DuplicateRequestError,
     PairStatusResult,
     PeerLinkClient,
     PeerLinkClientError,
@@ -64,7 +68,10 @@ from esphome_device_builder.controllers.remote_build.peer_link_client import (
     _build_ws_url,
     _DownloadArtifactsState,
     _extract_auto_provision_supported,
+    _extract_ha_addon,
     _extract_receiver_esphome_version,
+    _extract_receiver_friendly_name,
+    _extract_reset_build_env_supported,
     drive_initiator_round_trip,
     one_shot,
     preview_pair,
@@ -73,6 +80,10 @@ from esphome_device_builder.controllers.remote_build.peer_link_client import (
 from esphome_device_builder.controllers.remote_build.peer_link_client.client import (
     _LOCAL_CLOSE_AUTH_REJECTED,
     _LOCAL_CLOSE_RECEIVER_REJECTED,
+    _mdns_record_name,
+)
+from esphome_device_builder.controllers.remote_build.peer_link_lifecycle import (
+    spawn_peer_link_client,
 )
 from esphome_device_builder.helpers import json as _json
 from esphome_device_builder.helpers.api import CommandError
@@ -97,6 +108,8 @@ from esphome_device_builder.models import (
     EventType,
     IntentResponse,
     JobFailureReason,
+    JobSource,
+    JobType,
     OffloaderJobStateChangedData,
     OffloaderPeerLinkClosedData,
     OffloaderPeerLinkOpenedData,
@@ -107,13 +120,12 @@ from esphome_device_builder.models import (
     StoredPeer,
 )
 
+from .conftest import RemoteBuildTestHandles as RemoteBuildController
 from .conftest import (
-    MakeSettingsFactory,
     cancel_and_drain,
     capture_events,
     make_remote_build_controller,
 )
-from .conftest import RemoteBuildTestHandles as RemoteBuildController
 
 
 @pytest.fixture
@@ -654,6 +666,36 @@ async def test_request_pair_open_window_returns_pending(
     assert len(peers) == 1
     assert peers[0].dashboard_id == "abcdef0123456789"
     assert peers[0].status is PeerStatus.PENDING
+    # No identity fields supplied → wire defaults.
+    assert peers[0].friendly_name == ""
+    assert peers[0].ha_addon is False
+    assert peers[0].label_auto is False
+
+
+async def test_request_pair_carries_display_identity_over_the_wire(
+    receiver_server: tuple[TestServer, ReceiverController, str, bytes],
+) -> None:
+    """msg3 ``friendly_name`` / ``ha_addon`` / ``label_auto`` land on the receiver's row."""
+    server, controller, _, _ = receiver_server
+    await controller.set_pairing_window(open=True, client="test-tab")
+
+    result = await request_pair(
+        hostname="127.0.0.1",
+        port=server.port,
+        identity_priv=secrets.token_bytes(32),
+        label="green",
+        dashboard_id="abcdef0123456789",
+        friendly_name="Nicks-Mac-Studio",
+        ha_addon=True,
+        label_auto=True,
+    )
+
+    assert result.status is IntentResponse.PENDING
+    peers = controller.peers_snapshot()
+    assert len(peers) == 1
+    assert peers[0].friendly_name == "Nicks-Mac-Studio"
+    assert peers[0].ha_addon is True
+    assert peers[0].label_auto is True
 
 
 async def test_request_pair_closed_window_returns_no_pairing_window(
@@ -811,8 +853,10 @@ def _make_offloader_controller(*, config_dir: Path) -> OffloaderController:
     db.devices = MagicMock()
     db.devices.zeroconf = None
     db._dashboard_advertiser = None
+    db.dashboard_advertiser = None
     db.settings = MagicMock()
     db.settings.config_dir = config_dir
+    db.settings.on_ha_addon = False
     db.peer_link_identity_store = PeerLinkIdentityStore(config_dir)
     controller = OffloaderController(db)
     _CREATED_OFFLOADERS.append(controller)
@@ -929,6 +973,81 @@ async def test_controller_request_pair_fires_pairing_added_event(
     ]
     assert len(added) == 1
     assert added[0] == summary.to_dict()
+
+
+async def test_controller_request_pair_persists_receiver_label_auto(
+    receiver_server: tuple[TestServer, ReceiverController, str, bytes],
+    offloader_controller_dir: Path,
+) -> None:
+    """``receiver_label_auto=True`` lands on the RAM row, summary, and event."""
+    server, receiver_controller, expected_pin, _ = receiver_server
+    await receiver_controller.set_pairing_window(open=True, client="test-tab")
+
+    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
+    offloader._db.bus = MagicMock()
+
+    summary = await offloader.request_pair(
+        hostname="127.0.0.1",
+        port=server.port,
+        pin_sha256=expected_pin,
+        receiver_label="my-receiver",
+        offloader_label="my-builder",
+        receiver_label_auto=True,
+    )
+
+    assert summary.receiver_label_auto is True
+    assert offloader.state.pairings[expected_pin].receiver_label_auto is True
+    added = [
+        call.args[1]
+        for call in offloader._db.bus.fire.call_args_list
+        if call.args[0] is EventType.OFFLOADER_PAIRING_ADDED
+    ]
+    assert added[0]["receiver_label_auto"] is True
+
+
+async def test_controller_request_pair_defaults_receiver_label_auto_false(
+    receiver_server: tuple[TestServer, ReceiverController, str, bytes],
+    offloader_controller_dir: Path,
+) -> None:
+    """Omitting ``receiver_label_auto`` on a fresh pair defaults it to ``False``."""
+    server, receiver_controller, expected_pin, _ = receiver_server
+    await receiver_controller.set_pairing_window(open=True, client="test-tab")
+
+    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
+    offloader._db.bus = MagicMock()
+
+    summary = await offloader.request_pair(
+        hostname="127.0.0.1",
+        port=server.port,
+        pin_sha256=expected_pin,
+        receiver_label="my-receiver",
+        offloader_label="my-builder",
+    )
+
+    assert summary.receiver_label_auto is False
+
+
+async def test_controller_request_pair_rejects_non_bool_receiver_label_auto(
+    receiver_server: tuple[TestServer, ReceiverController, str, bytes],
+    offloader_controller_dir: Path,
+) -> None:
+    """A non-``bool`` ``receiver_label_auto`` is refused with INVALID_ARGS."""
+    server, receiver_controller, expected_pin, _ = receiver_server
+    await receiver_controller.set_pairing_window(open=True, client="test-tab")
+
+    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
+    offloader._db.bus = MagicMock()
+
+    with pytest.raises(CommandError) as exc:
+        await offloader.request_pair(
+            hostname="127.0.0.1",
+            port=server.port,
+            pin_sha256=expected_pin,
+            receiver_label="my-receiver",
+            offloader_label="my-builder",
+            receiver_label_auto="true",  # type: ignore[arg-type]
+        )
+    assert exc.value.code == ErrorCode.INVALID_ARGS
 
 
 async def test_controller_request_pair_pin_mismatch_raises_precondition_failed(
@@ -1264,6 +1383,9 @@ async def test_offloader_peer_link_event_listeners_update_open_set(
         "pin_sha256": pin,
         "esphome_version": "",
         "auto_provision_supported": False,
+        "friendly_name": "",
+        "ha_addon": False,
+        "reset_build_env_supported": False,
     }
     offloader._on_offloader_peer_link_opened(MagicMock(data=opened))
     assert pin in offloader.state.open_peer_links
@@ -1345,6 +1467,57 @@ def test_extract_auto_provision_supported_branches(
     assert _extract_auto_provision_supported(response) is expected
 
 
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        ({"friendly_name": "Nicks-Mac-Studio"}, "Nicks-Mac-Studio"),
+        ({"friendly_name": "  padded  "}, "padded"),
+        # Older receiver predating the field.
+        ({}, ""),
+        # Non-str from a buggy peer falls back to empty.
+        ({"friendly_name": 42}, ""),
+        ({"friendly_name": None}, ""),
+        # Peer-controlled wire data is bounded at the disk-side cap.
+        ({"friendly_name": "x" * 500}, "x" * 128),
+    ],
+)
+def test_extract_receiver_friendly_name_branches(response: dict[str, Any], expected: str) -> None:
+    """Helper reads the display name; missing / non-str ⇒ ``""``, oversize is capped."""
+    assert _extract_receiver_friendly_name(response) == expected
+
+
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        ({"ha_addon": True}, True),
+        ({"ha_addon": False}, False),
+        ({}, False),
+        ({"ha_addon": "1"}, False),
+        ({"ha_addon": 1}, False),
+    ],
+)
+def test_extract_ha_addon_branches(response: dict[str, Any], expected: bool) -> None:
+    """Helper reads the HA add-on flag; missing / non-bool ⇒ ``False``."""
+    assert _extract_ha_addon(response) is expected
+
+
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        ({"reset_build_env_supported": True}, True),
+        ({"reset_build_env_supported": False}, False),
+        ({}, False),
+        ({"reset_build_env_supported": "1"}, False),
+        ({"reset_build_env_supported": 1}, False),
+    ],
+)
+def test_extract_reset_build_env_supported_branches(
+    response: dict[str, Any], expected: bool
+) -> None:
+    """Helper reads the reset capability; missing / non-bool ⇒ ``False``."""
+    assert _extract_reset_build_env_supported(response) is expected
+
+
 async def test_peer_link_opened_refreshes_stored_pairing_version(
     offloader_controller_dir: Path,
 ) -> None:
@@ -1389,6 +1562,9 @@ async def test_peer_link_opened_refreshes_stored_pairing_version(
             "pin_sha256": pin,
             "esphome_version": version,
             "auto_provision_supported": False,
+            "friendly_name": "",
+            "ha_addon": False,
+            "reset_build_env_supported": False,
         }
         return MagicMock(data=payload)
 
@@ -1451,6 +1627,9 @@ async def test_peer_link_opened_refreshes_auto_provision_capability(
             "pin_sha256": pin,
             "esphome_version": "2026.5.0",
             "auto_provision_supported": supported,
+            "friendly_name": "",
+            "ha_addon": False,
+            "reset_build_env_supported": False,
         }
         return MagicMock(data=payload)
 
@@ -1472,6 +1651,106 @@ async def test_peer_link_opened_refreshes_auto_provision_capability(
     offloader._on_offloader_peer_link_opened(_opened(False))
     assert pairing.auto_provision_supported is False
     assert len(save_calls) == saves_after_enable + 1
+
+
+async def test_peer_link_opened_refreshes_display_identity(
+    offloader_controller_dir: Path,
+) -> None:
+    """``friendly_name`` refreshes non-empty-only; ``ha_addon`` tracks the wire."""
+    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
+    offloader._db.bus = MagicMock()
+    pin = "a" * 64
+    pairing = _stub_pairing(
+        receiver_hostname="rcv.local",
+        receiver_port=6055,
+        pin_sha256=pin,
+        status=PeerStatus.APPROVED,
+    )
+    offloader.state.pairings[pin] = pairing
+    save_calls: list[None] = []
+    offloader._schedule_pairings_save = lambda: save_calls.append(None)  # type: ignore[method-assign]
+
+    def _opened(friendly_name: str, ha_addon: bool) -> Any:
+        payload: OffloaderPeerLinkOpenedData = {
+            "receiver_hostname": "rcv.local",
+            "receiver_port": 6055,
+            "pin_sha256": pin,
+            "esphome_version": "",
+            "auto_provision_supported": False,
+            "friendly_name": friendly_name,
+            "ha_addon": ha_addon,
+            "reset_build_env_supported": False,
+        }
+        return MagicMock(data=payload)
+
+    offloader._on_offloader_peer_link_opened(_opened("Nicks-Mac-Studio", True))
+    assert pairing.friendly_name == "Nicks-Mac-Studio"
+    assert pairing.ha_addon is True
+    saves_after_capture = len(save_calls)
+    assert saves_after_capture >= 1
+
+    # Same values on reconnect: no redundant save.
+    offloader._on_offloader_peer_link_opened(_opened("Nicks-Mac-Studio", True))
+    assert len(save_calls) == saves_after_capture
+
+    # A downgraded receiver sending an empty name must not clobber
+    # the captured one; ha_addon still tracks the wire.
+    offloader._on_offloader_peer_link_opened(_opened("", False))
+    assert pairing.friendly_name == "Nicks-Mac-Studio"
+    assert pairing.ha_addon is False
+    assert len(save_calls) == saves_after_capture + 1
+
+    # An oversize peer-controlled name is dropped, not stored.
+    offloader._on_offloader_peer_link_opened(_opened("x" * 500, False))
+    assert pairing.friendly_name == "Nicks-Mac-Studio"
+
+    # A rename refreshes.
+    offloader._on_offloader_peer_link_opened(_opened("Renamed-Host", False))
+    assert pairing.friendly_name == "Renamed-Host"
+
+
+async def test_peer_link_opened_refreshes_reset_capability(
+    offloader_controller_dir: Path,
+) -> None:
+    """``reset_build_env_supported`` lands on the pairing and saves only on change."""
+    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
+    offloader._db.bus = MagicMock()
+    pin = "a" * 64
+    pairing = _stub_pairing(
+        receiver_hostname="rcv.local",
+        receiver_port=6055,
+        pin_sha256=pin,
+        status=PeerStatus.APPROVED,
+    )
+    offloader.state.pairings[pin] = pairing
+    save_calls: list[None] = []
+    offloader._schedule_pairings_save = lambda: save_calls.append(None)  # type: ignore[method-assign]
+
+    def _opened(supported: bool) -> Any:
+        payload: OffloaderPeerLinkOpenedData = {
+            "receiver_hostname": "rcv.local",
+            "receiver_port": 6055,
+            "pin_sha256": pin,
+            "esphome_version": "",
+            "auto_provision_supported": False,
+            "friendly_name": "",
+            "ha_addon": False,
+            "reset_build_env_supported": supported,
+        }
+        return MagicMock(data=payload)
+
+    offloader._on_offloader_peer_link_opened(_opened(True))
+    assert pairing.reset_build_env_supported is True
+    saves = len(save_calls)
+    assert saves >= 1
+
+    offloader._on_offloader_peer_link_opened(_opened(True))
+    assert len(save_calls) == saves
+
+    # Downgraded receiver: the capability tracks the wire back off.
+    offloader._on_offloader_peer_link_opened(_opened(False))
+    assert pairing.reset_build_env_supported is False
+    assert len(save_calls) == saves + 1
 
 
 async def test_peer_link_opened_for_unknown_pin_is_silent_no_op(
@@ -1498,6 +1777,9 @@ async def test_peer_link_opened_for_unknown_pin_is_silent_no_op(
         "pin_sha256": "a" * 64,
         "esphome_version": "2026.5.0",
         "auto_provision_supported": False,
+        "friendly_name": "",
+        "ha_addon": False,
+        "reset_build_env_supported": False,
     }
     offloader._on_offloader_peer_link_opened(MagicMock(data=payload))
     assert len(save_calls) == 0
@@ -2066,6 +2348,72 @@ async def test_request_pair_approved_preserves_operator_enabled_and_version(
     refreshed = offloader.state.pairings[pin]
     assert refreshed.enabled is False
     assert refreshed.esphome_version == "2025.5.0"
+
+
+async def test_request_pair_repair_carries_receiver_label_auto_when_omitted(
+    offloader_controller_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-pair omitting ``receiver_label_auto`` keeps the prior flag; an explicit value wins."""
+    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
+    offloader._db.bus = MagicMock()
+    pubkey = b"\x44" * 32
+    pin = hashlib.sha256(pubkey).hexdigest()
+
+    offloader.state.pairings[pin] = _stub_pairing(
+        receiver_hostname="rcv.local",
+        receiver_port=6055,
+        pin_sha256=pin,
+        static_x25519_pub=pubkey,
+        status=PeerStatus.APPROVED,
+    )
+    offloader.state.pairings[pin].receiver_label_auto = True
+
+    async def _fake_request_pair(**_: object) -> RequestPairResult:
+        return RequestPairResult(
+            status=IntentResponse.APPROVED,
+            pin_sha256=pin,
+            remote_static_pub=pubkey,
+        )
+
+    monkeypatch.setattr(
+        "esphome_device_builder.controllers.remote_build.pair_commands.peer_link_request_pair",
+        _fake_request_pair,
+    )
+    fake_identity = MagicMock()
+    fake_identity.private_bytes = b"\x00" * 32
+    fake_dashboard = MagicMock()
+    fake_dashboard.dashboard_id = "dashboard-stub"
+
+    async def _fake_load_offloader_identities(
+        _fi: MagicMock = fake_identity, _fd: MagicMock = fake_dashboard
+    ) -> tuple[MagicMock, MagicMock]:
+        return _fi, _fd
+
+    monkeypatch.setattr(
+        offloader, "_load_offloader_identities_async", _fake_load_offloader_identities
+    )
+    monkeypatch.setattr(offloader, "_spawn_peer_link_client", MagicMock())
+
+    # Omitted → prior True carries forward.
+    carried = await offloader.request_pair(
+        hostname="rcv.local",
+        port=6055,
+        pin_sha256=pin,
+        receiver_label="lab-pc",
+        offloader_label="off",
+    )
+    assert carried.receiver_label_auto is True
+
+    # Explicit False → the fresh value wins over the prior.
+    overridden = await offloader.request_pair(
+        hostname="rcv.local",
+        port=6055,
+        pin_sha256=pin,
+        receiver_label="lab-pc",
+        offloader_label="off",
+        receiver_label_auto=False,
+    )
+    assert overridden.receiver_label_auto is False
 
 
 async def test_unpair_does_not_fire_event_when_nothing_to_remove(
@@ -4494,6 +4842,100 @@ async def test_run_session_loops_finally_drains_pending_submit_acks(
         await pending
 
 
+async def test_run_session_loops_resolves_reset_build_env_ack_future(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``reset_build_env_ack`` frame fires the matching ack future."""
+    bus = EventBus()
+    client = _make_offloader_client(bus)
+    ack_fut: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+    client._reset_env_acks["j-1"] = ack_fut
+
+    frame = {
+        "type": "reset_build_env_ack",
+        "job_id": "j-1",
+        "accepted": False,
+        "reason": "busy",
+    }
+    async with _drive_session_with_frames(client, monkeypatch, [frame]):
+        ack = await asyncio.wait_for(ack_fut, timeout=2.0)
+
+    assert ack == frame
+
+
+async def test_run_session_loops_finally_drains_pending_reset_acks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pending reset acks complete with :class:`SubmitJobSessionLostError` on session end."""
+    bus = EventBus()
+    client = _make_offloader_client(bus)
+    pending: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+    client._reset_env_acks["abandoned"] = pending
+
+    async with _drive_session_with_frames(client, monkeypatch, []):
+        await asyncio.sleep(0)
+
+    with pytest.raises(SubmitJobSessionLostError):
+        await pending
+
+
+async def test_reset_build_env_raises_no_session_error_when_session_closed() -> None:
+    """:meth:`reset_build_env` without a live session raises :class:`PeerLinkNoSessionError`."""
+    client = _make_offloader_client(EventBus())
+    with pytest.raises(PeerLinkNoSessionError):
+        await client.reset_build_env(job_id="j-1")
+
+
+async def test_reset_build_env_send_failure_raises_session_lost() -> None:
+    """``send_frame`` returning ``False`` fails fast instead of waiting for the ack timeout."""
+    client = _make_offloader_client(EventBus())
+
+    async def _send_frame_fails(_frame: dict[str, Any]) -> bool:
+        return False  # Noise encrypt / WS send failed at this tick
+
+    channel = MagicMock()
+    channel.send_frame = _send_frame_fails
+    client._active_channel = channel
+
+    with pytest.raises(SubmitJobSessionLostError, match="request send failed"):
+        await client.reset_build_env(job_id="j-1")
+    # The per-job slot is freed even on the failure path.
+    assert not client._reset_env_acks
+
+
+async def test_reset_build_env_sends_frame_and_returns_ack() -> None:
+    """The reset frame carries the mirror job_id; the resolved ack is returned."""
+    client = _make_offloader_client(EventBus())
+    sent: list[dict[str, Any]] = []
+
+    async def _send_frame(frame: dict[str, Any]) -> bool:
+        sent.append(frame)
+        client._dispatch_reset_build_env_ack(
+            {"type": "reset_build_env_ack", "job_id": frame["job_id"], "accepted": True}
+        )
+        return True
+
+    channel = MagicMock()
+    channel.send_frame = _send_frame
+    client._active_channel = channel
+
+    ack = await client.reset_build_env(job_id="j-9")
+
+    assert sent == [{"type": "reset_build_env", "job_id": "j-9"}]
+    assert ack == {"type": "reset_build_env_ack", "job_id": "j-9", "accepted": True}
+    assert not client._reset_env_acks
+
+
+async def test_reset_build_env_duplicate_job_id_refused() -> None:
+    """A same-``job_id`` reset mid-flight is refused rather than clobbering the future."""
+    client = _make_offloader_client(EventBus())
+    client._active_channel = MagicMock()
+    client._reset_env_acks["j-1"] = asyncio.get_running_loop().create_future()
+
+    with pytest.raises(DuplicateRequestError, match="already registered"):
+        await client.reset_build_env(job_id="j-1")
+
+
 async def test_submit_job_raises_no_session_error_when_session_closed() -> None:
     """:meth:`submit_job` without a live session raises :class:`PeerLinkNoSessionError`."""
     client = _make_offloader_client(EventBus())
@@ -4628,7 +5070,7 @@ async def test_submit_job_rejects_duplicate_job_id() -> None:
     )
     # Pre-register a future under the id we'll re-submit against.
     client._submit_job_acks["j-dup"] = asyncio.get_running_loop().create_future()
-    with pytest.raises(PeerLinkNoSessionError):
+    with pytest.raises(DuplicateRequestError, match="already registered"):
         await client.submit_job(
             job_id="j-dup",
             configuration_filename="kitchen.yaml",
@@ -4638,7 +5080,7 @@ async def test_submit_job_rejects_duplicate_job_id() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Controller WS command (remote_build/submit_job)
+# Offloader peer-link client test helpers
 # ---------------------------------------------------------------------------
 
 
@@ -4651,7 +5093,8 @@ def _seed_open_peer_link_client(
     :class:`PeerLinkClient` with ``is_session_open=True`` and
     parks a ``done`` task on the handle so
     ``_lookup_open_peer_link_client`` finds it. Returns the
-    client object so the caller can monkeypatch ``submit_job``.
+    client object so the caller can monkeypatch
+    ``download_artifacts``.
     """
     client = _make_offloader_client(
         MagicMock(),
@@ -4682,286 +5125,6 @@ def _seed_open_peer_link_client(
     )
     # Caller is responsible for cancelling ``task`` at end-of-test.
     return client
-
-
-async def test_controller_submit_job_returns_ack_on_accept(
-    offloader_controller_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Happy path: validates input, builds bundle, sends, and returns the ack shape."""
-    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
-    offloader._db.bus = MagicMock()
-    pairing = _stub_pairing(
-        receiver_hostname="rcv.local",
-        receiver_port=6055,
-        status=PeerStatus.APPROVED,
-    )
-    offloader.state.pairings[pairing.pin_sha256] = pairing
-    # Drop a stub YAML at the expected path so ``rel_path`` resolves.
-    yaml_path = Path(offloader._db.settings.config_dir) / "kitchen.yaml"
-    yaml_path.write_text("esphome:\n  name: kitchen\n", encoding="utf-8")
-    client = _seed_open_peer_link_client(offloader, pairing)
-
-    async def _stub_build_bundle(_path: Path) -> bytes:
-        return b"bundle-bytes"
-
-    captured_args: dict[str, Any] = {}
-
-    async def _stub_submit_job(
-        *,
-        job_id: str,
-        configuration_filename: str,
-        target: Any,
-        bundle_bytes: bytes,
-    ) -> dict[str, Any]:
-        captured_args["job_id"] = job_id
-        captured_args["configuration_filename"] = configuration_filename
-        captured_args["target"] = target
-        captured_args["bundle_bytes"] = bundle_bytes
-        return {"type": "submit_job_ack", "job_id": job_id, "accepted": True}
-
-    monkeypatch.setattr(
-        "esphome_device_builder.helpers.config_bundle.build_yaml_bundle",
-        _stub_build_bundle,
-    )
-    monkeypatch.setattr(client, "submit_job", _stub_submit_job)
-
-    try:
-        result = await offloader.submit_job(
-            pin_sha256=pairing.pin_sha256,
-            configuration="kitchen.yaml",
-            target="compile",
-        )
-    finally:
-        # Drain the parked task spun up by ``_seed_open_peer_link_client``.
-        offloader.state.peer_link_clients[pairing.pin_sha256].task.cancel()
-        await asyncio.gather(
-            offloader.state.peer_link_clients[pairing.pin_sha256].task,
-            return_exceptions=True,
-        )
-
-    assert result == {"job_id": captured_args["job_id"], "accepted": True}
-    assert captured_args["configuration_filename"] == "kitchen.yaml"
-    assert captured_args["target"] == "compile"
-    assert captured_args["bundle_bytes"] == b"bundle-bytes"
-
-
-async def test_controller_submit_job_passes_through_reject_reason(
-    offloader_controller_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A non-accepted ack lands as ``{accepted: False, reason: ...}`` to the WS caller."""
-    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
-    offloader._db.bus = MagicMock()
-    pairing = _stub_pairing(
-        receiver_hostname="rcv.local",
-        receiver_port=6055,
-        status=PeerStatus.APPROVED,
-    )
-    offloader.state.pairings[pairing.pin_sha256] = pairing
-    (Path(offloader._db.settings.config_dir) / "kitchen.yaml").write_text(
-        "esphome:\n  name: kitchen\n", encoding="utf-8"
-    )
-    client = _seed_open_peer_link_client(offloader, pairing)
-
-    async def _stub_build_bundle(_path: Path) -> bytes:
-        return b"bundle-bytes"
-
-    async def _stub_submit_job(**kwargs: Any) -> dict[str, Any]:
-        return {
-            "type": "submit_job_ack",
-            "job_id": kwargs["job_id"],
-            "accepted": False,
-            "reason": "queue_rejected",
-        }
-
-    monkeypatch.setattr(
-        "esphome_device_builder.helpers.config_bundle.build_yaml_bundle",
-        _stub_build_bundle,
-    )
-    monkeypatch.setattr(client, "submit_job", _stub_submit_job)
-
-    try:
-        result = await offloader.submit_job(
-            pin_sha256=pairing.pin_sha256,
-            configuration="kitchen.yaml",
-            target="upload",
-        )
-    finally:
-        offloader.state.peer_link_clients[pairing.pin_sha256].task.cancel()
-        await asyncio.gather(
-            offloader.state.peer_link_clients[pairing.pin_sha256].task,
-            return_exceptions=True,
-        )
-
-    assert result["accepted"] is False
-    assert result["reason"] == "queue_rejected"
-
-
-async def test_controller_submit_job_invalid_target_raises_invalid_args(
-    offloader_controller_dir: Path,
-) -> None:
-    """A bad ``target`` value short-circuits with INVALID_ARGS before any wire activity."""
-    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
-    offloader._db.bus = MagicMock()
-    with pytest.raises(CommandError) as exc_info:
-        await offloader.submit_job(
-            pin_sha256="a" * 64,
-            configuration="kitchen.yaml",
-            target="install",  # not in {compile, upload}
-        )
-    assert exc_info.value.code == ErrorCode.INVALID_ARGS
-
-
-async def test_controller_submit_job_unknown_pairing_raises_not_found(
-    offloader_controller_dir: Path,
-) -> None:
-    """No pairing under the given pin → NOT_FOUND."""
-    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
-    offloader._db.bus = MagicMock()
-    (Path(offloader._db.settings.config_dir) / "kitchen.yaml").write_text(
-        "esphome:\n  name: kitchen\n", encoding="utf-8"
-    )
-    with pytest.raises(CommandError) as exc_info:
-        await offloader.submit_job(
-            pin_sha256="b" * 64,
-            configuration="kitchen.yaml",
-            target="compile",
-        )
-    assert exc_info.value.code == ErrorCode.NOT_FOUND
-
-
-async def test_controller_submit_job_pending_pairing_raises_precondition_failed(
-    offloader_controller_dir: Path,
-) -> None:
-    """A PENDING pairing rejects with PRECONDITION_FAILED."""
-    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
-    offloader._db.bus = MagicMock()
-    pairing = _stub_pairing(receiver_hostname="rcv.local", status=PeerStatus.PENDING)
-    offloader.state.pairings[pairing.pin_sha256] = pairing
-    (Path(offloader._db.settings.config_dir) / "kitchen.yaml").write_text(
-        "esphome:\n  name: kitchen\n", encoding="utf-8"
-    )
-    with pytest.raises(CommandError) as exc_info:
-        await offloader.submit_job(
-            pin_sha256=pairing.pin_sha256,
-            configuration="kitchen.yaml",
-            target="compile",
-        )
-    assert exc_info.value.code == ErrorCode.PRECONDITION_FAILED
-
-
-async def test_controller_submit_job_no_session_raises_precondition_failed(
-    offloader_controller_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Approved pairing but no live session → PRECONDITION_FAILED."""
-    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
-    offloader._db.bus = MagicMock()
-    pairing = _stub_pairing(
-        receiver_hostname="rcv.local",
-        status=PeerStatus.APPROVED,
-    )
-    offloader.state.pairings[pairing.pin_sha256] = pairing
-    (Path(offloader._db.settings.config_dir) / "kitchen.yaml").write_text(
-        "esphome:\n  name: kitchen\n", encoding="utf-8"
-    )
-    # No client spawned at all → PRECONDITION_FAILED before bundling.
-    with pytest.raises(CommandError) as exc_info:
-        await offloader.submit_job(
-            pin_sha256=pairing.pin_sha256,
-            configuration="kitchen.yaml",
-            target="compile",
-        )
-    assert exc_info.value.code == ErrorCode.PRECONDITION_FAILED
-
-
-async def test_controller_submit_job_timeout_maps_to_unavailable(
-    offloader_controller_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A :class:`SubmitJobTimeoutError` raised by the client → CommandError(UNAVAILABLE)."""
-    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
-    offloader._db.bus = MagicMock()
-    pairing = _stub_pairing(
-        receiver_hostname="rcv.local",
-        status=PeerStatus.APPROVED,
-    )
-    offloader.state.pairings[pairing.pin_sha256] = pairing
-    (Path(offloader._db.settings.config_dir) / "kitchen.yaml").write_text(
-        "esphome:\n  name: kitchen\n", encoding="utf-8"
-    )
-    client = _seed_open_peer_link_client(offloader, pairing)
-
-    async def _stub_build_bundle(_path: Path) -> bytes:
-        return b"bundle-bytes"
-
-    async def _stub_submit_job(**kwargs: Any) -> dict[str, Any]:
-        raise SubmitJobTimeoutError("ack timed out")
-
-    monkeypatch.setattr(
-        "esphome_device_builder.helpers.config_bundle.build_yaml_bundle",
-        _stub_build_bundle,
-    )
-    monkeypatch.setattr(client, "submit_job", _stub_submit_job)
-
-    try:
-        with pytest.raises(CommandError) as exc_info:
-            await offloader.submit_job(
-                pin_sha256=pairing.pin_sha256,
-                configuration="kitchen.yaml",
-                target="compile",
-            )
-    finally:
-        offloader.state.peer_link_clients[pairing.pin_sha256].task.cancel()
-        await asyncio.gather(
-            offloader.state.peer_link_clients[pairing.pin_sha256].task,
-            return_exceptions=True,
-        )
-    assert exc_info.value.code == ErrorCode.UNAVAILABLE
-
-
-async def test_controller_submit_job_empty_configuration_raises_invalid_args(
-    offloader_controller_dir: Path,
-) -> None:
-    """An empty ``configuration`` arg gets rejected upfront."""
-    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
-    offloader._db.bus = MagicMock()
-    with pytest.raises(CommandError) as exc_info:
-        await offloader.submit_job(
-            pin_sha256="a" * 64,
-            configuration="",
-            target="compile",
-        )
-    assert exc_info.value.code == ErrorCode.INVALID_ARGS
-
-
-async def test_controller_submit_job_rejects_path_traversal(
-    make_settings: MakeSettingsFactory,
-) -> None:
-    """Path-traversal ``configuration`` arg rejected by ``rel_path`` as INVALID_ARGS.
-
-    Uses the real :class:`DashboardSettings` (not the
-    :class:`MagicMock` stub from ``_make_offloader_controller``)
-    so :meth:`DashboardSettings.rel_path` actually performs its
-    ``relative_to(absolute_config_dir)`` check. The MagicMock-
-    stubbed Settings lets ``rel_path`` return a ``MagicMock``
-    silently — fine for tests that don't care about the
-    boundary, dangerous if those were the only tests covering
-    the boundary.
-    """
-    settings = make_settings()
-    db = MagicMock()
-    db.devices = MagicMock()
-    db.devices.zeroconf = None
-    db._dashboard_advertiser = None
-    db.settings = settings
-    offloader = OffloaderController(db)
-    offloader._db.bus = MagicMock()
-
-    with pytest.raises(CommandError) as exc_info:
-        await offloader.submit_job(
-            pin_sha256="a" * 64,
-            configuration="../etc/passwd",
-            target="compile",
-        )
-    assert exc_info.value.code == ErrorCode.INVALID_ARGS
 
 
 @pytest.mark.parametrize(
@@ -5051,228 +5214,6 @@ async def test_dispatch_job_output_drops_invalid_stream_literal() -> None:
         {"type": "job_output", "job_id": "j-1", "stream": "weird", "line": "x\n"}
     )
     assert len(captured) == 0
-
-
-async def test_controller_submit_job_yaml_invalid_maps_to_invalid_args(
-    offloader_controller_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``BundleBuildError`` from ``build_yaml_bundle`` lands as INVALID_ARGS."""
-    from esphome_device_builder.helpers.config_bundle import (  # noqa: PLC0415
-        BundleBuildError,
-    )
-
-    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
-    offloader._db.bus = MagicMock()
-    pairing = _stub_pairing(receiver_hostname="rcv.local", status=PeerStatus.APPROVED)
-    offloader.state.pairings[pairing.pin_sha256] = pairing
-    (Path(offloader._db.settings.config_dir) / "kitchen.yaml").write_text(
-        "esphome:\n  name: kitchen\n", encoding="utf-8"
-    )
-    _seed_open_peer_link_client(offloader, pairing)
-
-    async def _stub_build_bundle(_path: Path) -> bytes:
-        raise BundleBuildError("subprocess exited 1", output="schema validation failed")
-
-    monkeypatch.setattr(
-        "esphome_device_builder.helpers.config_bundle.build_yaml_bundle",
-        _stub_build_bundle,
-    )
-
-    try:
-        with pytest.raises(CommandError) as exc_info:
-            await offloader.submit_job(
-                pin_sha256=pairing.pin_sha256,
-                configuration="kitchen.yaml",
-                target="compile",
-            )
-    finally:
-        offloader.state.peer_link_clients[pairing.pin_sha256].task.cancel()
-        await asyncio.gather(
-            offloader.state.peer_link_clients[pairing.pin_sha256].task,
-            return_exceptions=True,
-        )
-    assert exc_info.value.code == ErrorCode.INVALID_ARGS
-
-
-async def test_controller_submit_job_missing_yaml_maps_to_not_found(
-    offloader_controller_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``FileNotFoundError`` from ``build_yaml_bundle`` lands as NOT_FOUND."""
-    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
-    offloader._db.bus = MagicMock()
-    pairing = _stub_pairing(receiver_hostname="rcv.local", status=PeerStatus.APPROVED)
-    offloader.state.pairings[pairing.pin_sha256] = pairing
-    (Path(offloader._db.settings.config_dir) / "kitchen.yaml").write_text(
-        "esphome:\n  name: kitchen\n", encoding="utf-8"
-    )
-    _seed_open_peer_link_client(offloader, pairing)
-
-    async def _stub_build_bundle(_path: Path) -> bytes:
-        raise FileNotFoundError("yaml gone")
-
-    monkeypatch.setattr(
-        "esphome_device_builder.helpers.config_bundle.build_yaml_bundle",
-        _stub_build_bundle,
-    )
-
-    try:
-        with pytest.raises(CommandError) as exc_info:
-            await offloader.submit_job(
-                pin_sha256=pairing.pin_sha256,
-                configuration="kitchen.yaml",
-                target="compile",
-            )
-    finally:
-        offloader.state.peer_link_clients[pairing.pin_sha256].task.cancel()
-        await asyncio.gather(
-            offloader.state.peer_link_clients[pairing.pin_sha256].task,
-            return_exceptions=True,
-        )
-    assert exc_info.value.code == ErrorCode.NOT_FOUND
-
-
-async def test_controller_submit_job_orphaned_client_raises_precondition_failed(
-    offloader_controller_dir: Path,
-) -> None:
-    """A handle whose task is .done() (orphaned) → PRECONDITION_FAILED with reason."""
-    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
-    offloader._db.bus = MagicMock()
-    pairing = _stub_pairing(receiver_hostname="rcv.local", status=PeerStatus.APPROVED)
-    offloader.state.pairings[pairing.pin_sha256] = pairing
-    # Build a handle whose task is already finished (orphaned).
-    bus = MagicMock()
-    client = PeerLinkClient(
-        receiver_hostname=pairing.receiver_hostname,
-        receiver_port=pairing.receiver_port,
-        identity_priv=secrets.token_bytes(32),
-        dashboard_id="alpha",
-        pinned_static_x25519_pub=pairing.static_x25519_pub,
-        pin_sha256=pairing.pin_sha256,
-        receiver_label=pairing.label,
-        bus=bus,
-    )
-
-    async def _exit_immediately() -> None:
-        return
-
-    finished_task = asyncio.create_task(_exit_immediately())
-    await asyncio.sleep(0)
-    assert finished_task.done()
-    offloader.state.peer_link_clients[pairing.pin_sha256] = rb_models.PeerLinkClientHandle(
-        client=client, task=finished_task
-    )
-
-    with pytest.raises(CommandError) as exc_info:
-        await offloader.submit_job(
-            pin_sha256=pairing.pin_sha256,
-            configuration="kitchen.yaml",
-            target="compile",
-        )
-    assert exc_info.value.code == ErrorCode.PRECONDITION_FAILED
-    assert "orphaned" in exc_info.value.message
-
-
-async def test_controller_submit_job_session_closed_branch_in_lookup(
-    offloader_controller_dir: Path,
-) -> None:
-    """A handle whose client has no live session lands as PRECONDITION_FAILED.
-
-    Distinct from the no-handle branch (covered by
-    ``test_controller_submit_job_no_session_raises_precondition_failed``)
-    and the orphaned-task branch (covered by
-    ``test_controller_submit_job_orphaned_client_raises_precondition_failed``).
-    Exercises the third "not ready" sub-branch — handle
-    present, task alive, but the peer-link is mid-reconnect /
-    receiver offline so ``is_session_open`` is False.
-    """
-    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
-    offloader._db.bus = MagicMock()
-    pairing = _stub_pairing(receiver_hostname="rcv.local", status=PeerStatus.APPROVED)
-    offloader.state.pairings[pairing.pin_sha256] = pairing
-    bus = MagicMock()
-    client = PeerLinkClient(
-        receiver_hostname=pairing.receiver_hostname,
-        receiver_port=pairing.receiver_port,
-        identity_priv=secrets.token_bytes(32),
-        dashboard_id="alpha",
-        pinned_static_x25519_pub=pairing.static_x25519_pub,
-        pin_sha256=pairing.pin_sha256,
-        receiver_label=pairing.label,
-        bus=bus,
-    )
-    # Don't set ``_active_channel`` — ``is_session_open`` returns False.
-    park = asyncio.Event()
-
-    async def _park() -> None:
-        await park.wait()
-
-    task: asyncio.Task[None] = asyncio.create_task(_park())
-    offloader.state.peer_link_clients[pairing.pin_sha256] = rb_models.PeerLinkClientHandle(
-        client=client, task=task
-    )
-
-    try:
-        with pytest.raises(CommandError) as exc_info:
-            await offloader.submit_job(
-                pin_sha256=pairing.pin_sha256,
-                configuration="kitchen.yaml",
-                target="compile",
-            )
-        assert exc_info.value.code == ErrorCode.PRECONDITION_FAILED
-        assert "session not connected" in exc_info.value.message
-    finally:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-
-
-async def test_controller_submit_job_no_session_during_send_maps_to_precondition_failed(
-    offloader_controller_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``PeerLinkNoSessionError`` raised mid-send → CommandError(PRECONDITION_FAILED).
-
-    Race-window coverage: the lookup succeeded
-    (``is_session_open`` was True at lookup time), but by the
-    time ``client.submit_job`` actually drives the send the
-    session has gone away. The WS layer maps the exception
-    class to PRECONDITION_FAILED rather than UNAVAILABLE
-    because the operator's resolution is the same as for the
-    lookup-time branch (wait for reconnect, retry).
-    """
-    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
-    offloader._db.bus = MagicMock()
-    pairing = _stub_pairing(receiver_hostname="rcv.local", status=PeerStatus.APPROVED)
-    offloader.state.pairings[pairing.pin_sha256] = pairing
-    (Path(offloader._db.settings.config_dir) / "kitchen.yaml").write_text(
-        "esphome:\n  name: kitchen\n", encoding="utf-8"
-    )
-    client = _seed_open_peer_link_client(offloader, pairing)
-
-    async def _stub_build_bundle(_path: Path) -> bytes:
-        return b"bundle-bytes"
-
-    async def _stub_submit_job(**kwargs: Any) -> dict[str, Any]:
-        raise PeerLinkNoSessionError("session lost between lookup and send")
-
-    monkeypatch.setattr(
-        "esphome_device_builder.helpers.config_bundle.build_yaml_bundle",
-        _stub_build_bundle,
-    )
-    monkeypatch.setattr(client, "submit_job", _stub_submit_job)
-
-    try:
-        with pytest.raises(CommandError) as exc_info:
-            await offloader.submit_job(
-                pin_sha256=pairing.pin_sha256,
-                configuration="kitchen.yaml",
-                target="compile",
-            )
-    finally:
-        offloader.state.peer_link_clients[pairing.pin_sha256].task.cancel()
-        await asyncio.gather(
-            offloader.state.peer_link_clients[pairing.pin_sha256].task,
-            return_exceptions=True,
-        )
-    assert exc_info.value.code == ErrorCode.PRECONDITION_FAILED
 
 
 # ---------------------------------------------------------------------------
@@ -5390,89 +5331,6 @@ async def test_peer_link_client_cancel_job_raises_when_session_closed() -> None:
         await client.cancel_job(job_id="j-1")
 
 
-async def test_controller_cancel_job_dispatches_via_client(
-    offloader_controller_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Happy path: validates input, looks up the client, calls cancel_job."""
-    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
-    offloader._db.bus = MagicMock()
-    pairing = _stub_pairing(
-        receiver_hostname="rcv.local",
-        receiver_port=6055,
-        status=PeerStatus.APPROVED,
-    )
-    offloader.state.pairings[pairing.pin_sha256] = pairing
-    client = _seed_open_peer_link_client(offloader, pairing)
-
-    captured_kwargs: dict[str, Any] = {}
-
-    async def _stub_cancel(*, job_id: str) -> bool:
-        captured_kwargs["job_id"] = job_id
-        return True
-
-    monkeypatch.setattr(client, "cancel_job", _stub_cancel)
-
-    try:
-        result = await offloader.cancel_job(pin_sha256=pairing.pin_sha256, job_id="j-1")
-    finally:
-        offloader.state.peer_link_clients[pairing.pin_sha256].task.cancel()
-        await asyncio.gather(
-            offloader.state.peer_link_clients[pairing.pin_sha256].task,
-            return_exceptions=True,
-        )
-    assert result == {"sent": True}
-    assert captured_kwargs == {"job_id": "j-1"}
-
-
-async def test_controller_cancel_job_empty_job_id_raises_invalid_args(
-    offloader_controller_dir: Path,
-) -> None:
-    """An empty ``job_id`` arg gets rejected upfront."""
-    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
-    offloader._db.bus = MagicMock()
-    with pytest.raises(CommandError) as exc_info:
-        await offloader.cancel_job(pin_sha256="a" * 64, job_id="")
-    assert exc_info.value.code == ErrorCode.INVALID_ARGS
-
-
-async def test_controller_cancel_job_unknown_pairing_raises_not_found(
-    offloader_controller_dir: Path,
-) -> None:
-    """No pairing under the given pin → NOT_FOUND."""
-    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
-    offloader._db.bus = MagicMock()
-    with pytest.raises(CommandError) as exc_info:
-        await offloader.cancel_job(pin_sha256="b" * 64, job_id="j-1")
-    assert exc_info.value.code == ErrorCode.NOT_FOUND
-
-
-async def test_controller_cancel_job_no_session_raises_precondition_failed(
-    offloader_controller_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``PeerLinkNoSessionError`` from the client → PRECONDITION_FAILED."""
-    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
-    offloader._db.bus = MagicMock()
-    pairing = _stub_pairing(receiver_hostname="rcv.local", status=PeerStatus.APPROVED)
-    offloader.state.pairings[pairing.pin_sha256] = pairing
-    client = _seed_open_peer_link_client(offloader, pairing)
-
-    async def _stub_cancel(**_kwargs: Any) -> bool:
-        raise PeerLinkNoSessionError("session vanished between lookup and send")
-
-    monkeypatch.setattr(client, "cancel_job", _stub_cancel)
-
-    try:
-        with pytest.raises(CommandError) as exc_info:
-            await offloader.cancel_job(pin_sha256=pairing.pin_sha256, job_id="j-1")
-    finally:
-        offloader.state.peer_link_clients[pairing.pin_sha256].task.cancel()
-        await asyncio.gather(
-            offloader.state.peer_link_clients[pairing.pin_sha256].task,
-            return_exceptions=True,
-        )
-    assert exc_info.value.code == ErrorCode.PRECONDITION_FAILED
-
-
 # ---------------------------------------------------------------------------
 # PeerLinkClient.download_artifacts — flow tests (issue #106)
 # ---------------------------------------------------------------------------
@@ -5487,13 +5345,13 @@ async def test_download_artifacts_raises_no_session_error_when_session_closed() 
 
 
 async def test_download_artifacts_rejects_duplicate_job_id_on_same_session() -> None:
-    """A second concurrent download on the same job_id raises :class:`PeerLinkNoSessionError`."""
+    """A second concurrent download on the same job_id raises :class:`DuplicateRequestError`."""
     client = _make_offloader_client(EventBus())
     parked: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
     client._artifacts_downloads["already-running"] = _DownloadArtifactsState(future=parked)
     # Spoof an open channel so the no-session check passes.
     client._active_channel = MagicMock()
-    with pytest.raises(PeerLinkNoSessionError, match="duplicate download"):
+    with pytest.raises(DuplicateRequestError, match="duplicate download_artifacts"):
         await client.download_artifacts(job_id="already-running")
 
 
@@ -6212,3 +6070,168 @@ async def test_run_one_session_logs_connected_peer_after_tcp_connect(
     # reconnect landed on a different host than expected.
     assert "peer=" in msg
     assert "127.0.0.1" in msg.split("peer=", 1)[1]
+
+
+# ---------------------------------------------------------------------------
+# mDNS fast reconnect
+# ---------------------------------------------------------------------------
+
+
+def test_mdns_record_name_shapes() -> None:
+    """Hostnames normalise to a lowercase trailing-dot name; IPs match nothing."""
+    assert _mdns_record_name("Esphome-Builder-ABC.local") == "esphome-builder-abc.local."
+    assert _mdns_record_name("esphome-builder-abc.local.") == "esphome-builder-abc.local."
+    assert _mdns_record_name("192.168.1.5") is None
+    assert _mdns_record_name("192.168.1.5.") is None
+    assert _mdns_record_name("fd00::a1") is None
+
+
+async def test_wait_reconnect_wakes_on_receiver_address_record() -> None:
+    """An A record for the receiver's host breaks the backoff wait immediately."""
+    client = _make_offloader_client(EventBus(), receiver_hostname="esphome-builder-abc.local")
+    listeners: list[Any] = []
+    # spec'd so a call to a method the real sync Zeroconf doesn't have
+    # fails here instead of only in production (the AsyncZeroconf-vs-
+    # Zeroconf wrapper bug shape).
+    zc = MagicMock(spec=Zeroconf)
+    zc.async_add_listener = MagicMock(side_effect=lambda lst, _q: listeners.append(lst))
+    client._get_zeroconf = lambda: zc
+
+    waiter = asyncio.create_task(client._wait_reconnect(30.0))
+    await asyncio.sleep(0)
+    assert len(listeners) == 1
+
+    matching = MagicMock()
+    matching.new.type = _TYPE_A
+    matching.new.name = "Esphome-Builder-ABC.local."
+    # A non-matching record first: must not wake.
+    other = MagicMock()
+    other.new.type = _TYPE_A
+    other.new.name = "someone-else.local."
+    listeners[0].async_update_records(zc, 0.0, [other])
+    await asyncio.sleep(0)
+    assert not waiter.done()
+
+    listeners[0].async_update_records(zc, 0.0, [matching])
+    # A second matching batch after the wake is a no-op (one-shot gate).
+    listeners[0].async_update_records(zc, 0.0, [matching])
+    await asyncio.wait_for(waiter, timeout=1.0)
+    zc.async_remove_listener.assert_called_once()
+
+
+async def test_wait_reconnect_plain_sleep_for_ip_endpoint() -> None:
+    """An IP-endpoint pairing has nothing to match; the wait is a plain sleep."""
+    client = _make_offloader_client(EventBus(), receiver_hostname="192.168.1.5")
+    zc = MagicMock(spec=Zeroconf)
+    client._get_zeroconf = lambda: zc
+
+    await client._wait_reconnect(0)
+
+    zc.async_add_listener.assert_not_called()
+
+
+async def test_spawn_peer_link_client_wires_the_zeroconf_getter(
+    offloader_controller_dir: Path,
+) -> None:
+    """The spawned client reads the shared zeroconf lazily through its getter."""
+    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
+    offloader._db.bus = EventBus()
+    _prime_offloader_identity_for_spawn(offloader)
+    pairing = _stub_pairing(status=PeerStatus.APPROVED)
+
+    spawn_peer_link_client(offloader, pairing)
+    handle = offloader.state.peer_link_clients[pairing.pin_sha256]
+    try:
+        assert handle.client._get_zeroconf is not None
+        # devices.zeroconf is the lazily-read source; follow every shape.
+        offloader._db.devices.zeroconf = None
+        assert handle.client._get_zeroconf() is None
+        # The getter must hand back the inner sync Zeroconf (where the
+        # listener API lives), not the AsyncZeroconf wrapper.
+        aiozc = MagicMock(spec=AsyncZeroconf)
+        inner = MagicMock(spec=Zeroconf)
+        aiozc.zeroconf = inner
+        offloader._db.devices.zeroconf = aiozc
+        got = handle.client._get_zeroconf()
+        assert got is inner
+        assert hasattr(got, "async_add_listener")  # the sync Zeroconf API
+        offloader._db.devices = None
+        assert handle.client._get_zeroconf() is None
+    finally:
+        handle.task.cancel()
+        await asyncio.gather(handle.task, return_exceptions=True)
+
+
+# ---------------------------------------------------------------------------
+# remote_build/reset_peer_build_env WS command
+# ---------------------------------------------------------------------------
+
+
+def _seed_reset_capable_pairing(offloader: OffloaderController, pin: str) -> StoredPairing:
+    pairing = _stub_pairing(pin_sha256=pin, status=PeerStatus.APPROVED)
+    pairing.reset_build_env_supported = True
+    offloader.state.pairings[pin] = pairing
+    return pairing
+
+
+async def test_reset_peer_build_env_unknown_pin_raises_not_found(
+    offloader_controller_dir: Path,
+) -> None:
+    """No pairing for the pin → NOT_FOUND."""
+    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
+    with pytest.raises(CommandError) as excinfo:
+        await offloader.reset_peer_build_env(pin_sha256="b" * 64)
+    assert excinfo.value.code is ErrorCode.NOT_FOUND
+
+
+async def test_reset_peer_build_env_without_capability_raises_precondition(
+    offloader_controller_dir: Path,
+) -> None:
+    """A receiver that never advertised the capability refuses before any wire I/O."""
+    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
+    pin = "a" * 64
+    offloader.state.pairings[pin] = _stub_pairing(pin_sha256=pin, status=PeerStatus.APPROVED)
+    with pytest.raises(CommandError) as excinfo:
+        await offloader.reset_peer_build_env(pin_sha256=pin)
+    assert excinfo.value.code is ErrorCode.PRECONDITION_FAILED
+    assert "does not support" in excinfo.value.message
+
+
+async def test_reset_peer_build_env_not_connected_raises_precondition(
+    offloader_controller_dir: Path,
+) -> None:
+    """Capability present but no live session → the lookup's PRECONDITION_FAILED."""
+    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
+    pin = "a" * 64
+    _seed_reset_capable_pairing(offloader, pin)
+    with pytest.raises(CommandError) as excinfo:
+        await offloader.reset_peer_build_env(pin_sha256=pin)
+    assert excinfo.value.code is ErrorCode.PRECONDITION_FAILED
+
+
+async def test_reset_peer_build_env_enqueues_server_bound_mirror_job(
+    offloader_controller_dir: Path,
+) -> None:
+    """A capable, connected pairing enqueues a REMOTE-source mirror job and returns it."""
+    offloader = _make_offloader_controller(config_dir=offloader_controller_dir)
+    pin = "a" * 64
+    pairing = _seed_reset_capable_pairing(offloader, pin)
+    pairing.esphome_version = "2026.6.0"
+    offloader._lookup_open_peer_link_client = (  # type: ignore[method-assign]
+        lambda pin_sha256, label: MagicMock()
+    )
+    firmware = MagicMock()
+    firmware._enqueue = AsyncMock(side_effect=lambda job, **_: job)
+    offloader._db.firmware = firmware
+
+    job = await offloader.reset_peer_build_env(pin_sha256=pin)
+
+    assert job is firmware._create_job.return_value
+    args, kwargs = firmware._create_job.call_args
+    assert args == ("", JobType.RESET_BUILD_ENV)
+    build_source = kwargs["build_source"]
+    assert build_source.source is JobSource.REMOTE
+    assert build_source.source_pin_sha256 == pin
+    assert build_source.source_label == pairing.label
+    assert build_source.source_esphome_version == "2026.6.0"
+    assert firmware._enqueue.call_args.kwargs == {"supersede": False}

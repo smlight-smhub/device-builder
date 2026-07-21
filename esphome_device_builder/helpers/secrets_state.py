@@ -26,13 +26,14 @@ from pathlib import Path
 from typing import Any
 
 from esphome import yaml_util
+from esphome.const import PLACEHOLDER_WIFI_PASSWORD, PLACEHOLDER_WIFI_SSID
 from esphome.core import EsphomeError
 from esphome.helpers import write_file as atomic_write_file
 from ruamel.yaml import YAML
 
 from ..constants import SECRETS_FILENAME
 from .async_ import run_in_executor
-from .yaml import load_yaml_fast_then_esphome
+from .yaml import load_yaml_fast_then_esphome, write_user_yaml
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -45,19 +46,6 @@ async def write_secrets_locked[T](lock: asyncio.Lock, fn: Callable[..., T], *arg
     """
     async with lock:
         return await run_in_executor(fn, *args)
-
-
-# Bootstrap placeholder strings. Upstream now exports these from
-# ``esphome.const``; fall back to local literals on older releases
-# that predate the promotion.
-try:
-    from esphome.const import (
-        PLACEHOLDER_WIFI_PASSWORD,
-        PLACEHOLDER_WIFI_SSID,
-    )
-except ImportError:
-    PLACEHOLDER_WIFI_SSID = "REPLACE_WITH_YOUR_WIFI_NETWORK"
-    PLACEHOLDER_WIFI_PASSWORD = "REPLACE_WITH_YOUR_WIFI_PASSWORD"  # noqa: S105
 
 
 def read_secrets_yaml(config_dir: Path) -> dict | None:
@@ -164,7 +152,7 @@ def merge_secrets_file(src: Path, dest: Path) -> None:
     YAML().dump(absent, buf)
     existing_text = dest.read_text("utf-8")
     separator = "" if not existing_text or existing_text.endswith("\n") else "\n"
-    atomic_write_file(dest, existing_text + separator + buf.getvalue())
+    write_user_yaml(dest, existing_text + separator + buf.getvalue())
 
 
 # ``key: value`` line. Captures: 1=indent, 2=key, 3=trailing
@@ -262,7 +250,7 @@ def migrate_placeholder_wifi_secrets(config_dir: Path) -> None:
         if not ((m := _SECRET_LINE_RE.match(line)) and m.group(2) in drop)
     )
     if updated != original:
-        atomic_write_file(secrets_path, updated)
+        write_user_yaml(secrets_path, updated)
 
 
 def write_wifi_secrets(config_dir: Path, ssid: str, password: str) -> None:
@@ -283,7 +271,7 @@ def write_wifi_secrets(config_dir: Path, ssid: str, password: str) -> None:
         "wifi_password",
         password,
     )
-    atomic_write_file(secrets_path, updated)
+    write_user_yaml(secrets_path, updated)
 
 
 def write_secret(config_dir: Path, key: str, value: str, *, overwrite: bool = True) -> bool:
@@ -302,7 +290,7 @@ def write_secret(config_dir: Path, key: str, value: str, *, overwrite: bool = Tr
         return False
     updated = _replace_or_append_secret(original, key, value)
     validate_secrets_content(updated, secrets_path)
-    atomic_write_file(secrets_path, updated)
+    write_user_yaml(secrets_path, updated)
     return not existed
 
 

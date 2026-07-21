@@ -71,14 +71,23 @@ featured_components:
     cf1_pin:
       value: 4
       locked: true
+    voltage_divider: '1670'
+    update_interval: 15s
     change_mode_every: 1
     id: sensor_hlw8012_1
 - id: analog_buttons
   component_id: sensor.adc
   fields:
+    pin:
+      value: A0
+      locked: true
     raw: true
     update_interval: 100ms
     unit_of_measurement: ''
+    filters:
+      value:
+      - delta: 50
+      locked: true
     id: analog_buttons
     name: analog_buttons
 - id: relay_top_outlet
@@ -103,5 +112,5 @@ source:
   type: esphome-devices
   remote_id: Gosund-WO1
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Gosund-WO1/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: e550c16029870bb9c7b92a2a5e00ce56e6b7b0ee92526da567d14d2b42bf0ec2

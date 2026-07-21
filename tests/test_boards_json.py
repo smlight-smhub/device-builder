@@ -18,10 +18,13 @@ once at startup by the components controller). These tests pin:
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from typing import Any
 
 import orjson
+import pytest
 from esphome.components.esp32.boards import BOARDS as ESP32_BOARDS
 
 from esphome_device_builder.definitions import (
@@ -52,6 +55,7 @@ from script.sync_boards import (
     _NRF52_PLATFORM,
     _augment_rmii_data_pins,
     _augment_rp2040_onboard_ethernet_pins,
+    _backfill_donor_pins,
     _backfill_esp32_engineering_sample,
     _backfill_esp32_variants,
     _backfill_libretiny_mcu,
@@ -81,6 +85,11 @@ _BODY_ONLY_KEYS = frozenset(
 )
 
 
+@pytest.mark.skipif(
+    bool(os.environ.get("CI")) and sys.platform != "linux",
+    reason="CI's lint drift gate already regenerates and byte-compares the catalog; "
+    "re-deriving it on the slow Windows/macOS runners buys nothing",
+)
 def test_split_artefacts_match_manifests() -> None:
     """
     The committed artefacts reproduce what the manifests produce.
@@ -104,6 +113,13 @@ def test_split_artefacts_match_manifests() -> None:
     _backfill_rp2040_mcu(from_yaml.boards)
     _backfill_libretiny_mcu(from_yaml.boards)
     _augment_rp2040_onboard_ethernet_pins(from_yaml.boards)
+    # In emission the platform augments fill esp8266 product boards before the
+    # donor pass ever sees them; the replay skips those augments, so capture
+    # which boards they would have owned before the donor pass claims them.
+    esp8266_empty = {
+        b.id for b in from_yaml.boards if b.esphome.platform.value == "esp8266" and not b.pins
+    }
+    _backfill_donor_pins(from_yaml.boards)
     _augment_rmii_data_pins(from_yaml.boards)
     _stamp_featured_locked_pins(from_yaml.boards)
     _stamp_featured_requires(from_yaml.boards)
@@ -134,7 +150,7 @@ def test_split_artefacts_match_manifests() -> None:
         # esphome_filled manifests ship no pins; esp8266 product manifests ship
         # empty pins filled at sync. Either way pins are esphome-derived and
         # version-dependent here — curated esp8266 pins stay compared.
-        if platform in esphome_filled or (platform == "esp8266" and not board.pins):
+        if platform in esphome_filled or board.id in esp8266_empty:
             expected.pop("pins", None)
             actual.pop("pins", None)
         # Images are vendor-controlled URLs; a manifest image edit shouldn't fail
@@ -208,6 +224,26 @@ def test_boards_index_omits_default_fields() -> None:
     # than an accidentally-empty regeneration.
     payload = orjson.loads(raw)
     assert len(payload["boards"]) > 100
+
+
+def test_boards_index_is_one_entry_per_line() -> None:
+    """The committed index keeps each board on its own line (merge-conflict shape)."""
+    raw = _BOARDS_INDEX_JSON.read_bytes()
+    payload = orjson.loads(raw)
+    assert len(raw.splitlines()) == len(payload["boards"]) + 5
+    entry_lines = raw.splitlines()[2 : 2 + len(payload["boards"])]
+    for line, entry in zip(entry_lines, payload["boards"], strict=True):
+        assert orjson.loads(line.rstrip(b",")) == entry
+
+
+def test_featured_index_is_one_board_per_line() -> None:
+    """The committed featured map keeps each board's list on its own line."""
+    raw = _FEATURED_INDEX_JSON.read_bytes()
+    payload = orjson.loads(raw)
+    lines = raw.splitlines()
+    assert len(lines) == len(payload) + 2
+    for line, key in zip(lines[1:-1], sorted(payload), strict=True):
+        assert orjson.loads(b"{" + line.rstrip(b",") + b"}") == {key: payload[key]}
 
 
 def test_usb_pin_features_match_notes() -> None:
@@ -640,13 +676,24 @@ def test_libretiny_boards_carry_the_chip_series_mcu() -> None:
     assert mcu["generic-rtl8710bn-2mb-788k"] == "rtl8710b"
     assert mcu["generic-rtl8720cf-2mb-896k"] == "rtl8720c"
     assert mcu["ln-02"] == "ln882h"
-    # A board ESPHome doesn't list still gets the platform's sole token.
-    assert mcu["generic-ln882hki"] == "ln882h"
     # Every LibreTiny board carries a token; none is stranded from the picker.
     stranded = [
         b.id for b in index if b.esphome.platform.value in _LIBRETINY_FAMILIES and not b.esphome.mcu
     ]
     assert not stranded, stranded
+
+
+def test_libretiny_mcu_backfill_falls_back_to_the_sole_token() -> None:
+    """A board ESPHome doesn't list still gets the platform's sole token."""
+    entry = BoardCatalogEntry(
+        id="not-an-esphome-board",
+        name="Not an ESPHome board",
+        description="",
+        manufacturer="",
+        esphome=BoardEsphomeConfig(platform=Platform.LN882X, board="not-an-esphome-board"),
+    )
+    _backfill_libretiny_mcu([entry])
+    assert entry.esphome.mcu == "ln882h"
 
 
 def test_esp32_engineering_sample_matches_esphome_boards_table() -> None:

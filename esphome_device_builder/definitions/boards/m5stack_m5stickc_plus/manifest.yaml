@@ -42,10 +42,10 @@ pins:
   occupied_by: mic
 - gpio: 37
   available: false
-  occupied_by: Button A
+  occupied_by: M5StickC Button A
 - gpio: 39
   available: false
-  occupied_by: Button B
+  occupied_by: M5StickC Button B
 docs_url: https://devices.esphome.io/devices/M5Stack-M5StickC-PLUS/
 product_url: https://docs.m5stack.com/en/core/m5stickc_plus
 featured_components:
@@ -79,7 +79,7 @@ featured_components:
         inverted: true
       locked: true
     id: binary_sensor_gpio_1
-    name: Button A
+    name: M5StickC Button A
 - id: binary_sensor_gpio_2
   component_id: binary_sensor.gpio
   fields:
@@ -89,7 +89,7 @@ featured_components:
         inverted: true
       locked: true
     id: binary_sensor_gpio_2
-    name: Button B
+    name: M5StickC Button B
 - id: display_st7789v_1
   component_id: display.st7789v
   fields:
@@ -113,7 +113,7 @@ featured_components:
   fields:
     output: builtin_led
     id: led1
-    name: Led
+    name: M5StickC Led
 - id: mic
   component_id: microphone.i2s_audio
   fields:
@@ -137,7 +137,7 @@ featured_components:
     id: builtin_led
 featured_bundles:
 - id: led1_setup
-  name: Led (full setup)
+  name: M5StickC Led (full setup)
   component_ids:
   - builtin_led
   - led1
@@ -145,5 +145,5 @@ source:
   type: esphome-devices
   remote_id: M5Stack-M5StickC-PLUS
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/M5Stack-M5StickC-PLUS/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 6c0a12b453d60118a60bb4e0a55c2e57c5a05c123407eccba4b2c698da714753

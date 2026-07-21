@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
 from esphome.core import CORE
 
 from esphome_device_builder.controllers._device_scanner import (
@@ -42,6 +43,7 @@ from esphome_device_builder.controllers.devices._metadata_store import DeviceMet
 from esphome_device_builder.helpers.event_bus import Event
 from esphome_device_builder.models import (
     Device,
+    DeviceState,
     EventType,
     FirmwareJob,
     JobStatus,
@@ -528,6 +530,22 @@ async def test_sync_after_flash_already_in_sync_is_noop(monkeypatch: Any) -> Non
     assert fired == []
 
 
+@pytest.mark.parametrize("api_enabled", [False, True], ids=["non_api", "api"])
+async def test_sync_after_flash_stamps_deployed_identity(
+    monkeypatch: Any, api_enabled: bool
+) -> None:
+    """A flash is first-party identity evidence; the monitor owns the ownership guard."""
+    monkeypatch.setattr(_VERSION_READ, lambda _cfg: "2026.6.2")
+    device = _device(api_enabled=api_enabled, expected_config_hash="aaaa1111")
+    controller, _fired = _flush_controller(device)
+
+    await controller._sync_deployed_state_after_flash("kitchen.yaml")
+
+    controller._state_monitor.apply_deployed_identity_live.assert_called_once_with(
+        "kitchen", live=True
+    )
+
+
 async def test_sync_after_flash_unknown_configuration_is_noop(monkeypatch: Any) -> None:
     """Configuration not in the scanner's device list — silently skip."""
     monkeypatch.setattr(_VERSION_READ, lambda _cfg: "2026.6.2")
@@ -559,6 +577,7 @@ async def test_sync_after_flash_unknown_configuration_is_noop(monkeypatch: Any) 
 _DELAY = (
     "esphome_device_builder.controllers.devices.firmware_sync._POST_FLASH_VERSION_REPROBE_DELAY"
 )
+_INTERVAL = firmware_sync._DEEP_SLEEP_REPROBE_INTERVAL
 
 
 def _reprobe_controller(device: Device | None) -> Any:
@@ -582,7 +601,7 @@ async def test_schedule_version_reprobe_fires_and_requests(monkeypatch: Any) -> 
     controller._schedule_version_reprobe("kitchen.yaml")
     await asyncio.sleep(0.01)  # let the call_later(0) timer fire
 
-    controller._state_monitor.request_version_reprobe.assert_called_once_with(device.name)
+    controller._state_monitor.api_info.request_reprobe.assert_called_once_with(device.name)
     assert controller._reprobe_timers == {}  # consumed
 
 
@@ -592,7 +611,7 @@ async def test_fire_version_reprobe_unknown_configuration_is_noop() -> None:
 
     firmware_sync._fire_version_reprobe(controller, "kitchen.yaml")
 
-    controller._state_monitor.request_version_reprobe.assert_not_called()
+    controller._state_monitor.api_info.request_reprobe.assert_not_called()
 
 
 async def test_schedule_version_reprobe_reschedule_cancels_previous(monkeypatch: Any) -> None:
@@ -619,6 +638,84 @@ async def test_cancel_reprobe_timers_cancels_pending(monkeypatch: Any) -> None:
     controller._cancel_reprobe_timers()
 
     assert handle.cancelled()
+    assert controller._reprobe_timers == {}
+
+
+async def test_deep_sleep_arms_burst_not_single_probe() -> None:
+    """A ``uses_deep_sleep`` device arms the first burst tick at the short delay, not 60s."""
+    controller = _reprobe_controller(_device(uses_deep_sleep=True))
+    loop = asyncio.get_running_loop()
+
+    controller._schedule_version_reprobe("kitchen.yaml")
+
+    handle = controller._reprobe_timers["kitchen.yaml"]
+    expected = firmware_sync._DEEP_SLEEP_REPROBE_INTERVAL
+    assert handle.when() - loop.time() == pytest.approx(expected, abs=1)
+    controller._cancel_reprobe_timers()
+
+
+async def test_non_deep_sleep_arms_single_probe(monkeypatch: Any) -> None:
+    """A device without ``deep_sleep:`` keeps the single ~60s probe."""
+    monkeypatch.setattr(_DELAY, 60)
+    controller = _reprobe_controller(_device(uses_deep_sleep=False))
+    loop = asyncio.get_running_loop()
+
+    controller._schedule_version_reprobe("kitchen.yaml")
+
+    handle = controller._reprobe_timers["kitchen.yaml"]
+    assert handle.when() - loop.time() == pytest.approx(60, abs=1)
+    controller._cancel_reprobe_timers()
+
+
+async def test_burst_requests_and_rearms_until_deadline() -> None:
+    """Each burst tick re-probes an offline device and re-arms while inside the window."""
+    controller = _reprobe_controller(_device())  # default state UNKNOWN
+    loop = asyncio.get_running_loop()
+
+    firmware_sync._fire_version_reprobe(
+        controller, "kitchen.yaml", deadline=loop.time() + 1000, interval=_INTERVAL
+    )
+
+    controller._state_monitor.api_info.request_reprobe.assert_called_once_with("kitchen")
+    assert "kitchen.yaml" in controller._reprobe_timers  # re-armed
+    controller._cancel_reprobe_timers()
+
+
+async def test_burst_probes_despite_stale_online_reading() -> None:
+    """Right after a flash the ONLINE reading is stale (pre-reboot); the burst still probes."""
+    controller = _reprobe_controller(_device(state=DeviceState.ONLINE))
+    loop = asyncio.get_running_loop()
+
+    firmware_sync._fire_version_reprobe(
+        controller, "kitchen.yaml", deadline=loop.time() + 1000, interval=_INTERVAL
+    )
+
+    controller._state_monitor.api_info.request_reprobe.assert_called_once_with("kitchen")
+    assert "kitchen.yaml" in controller._reprobe_timers  # re-armed, not aborted
+    controller._cancel_reprobe_timers()
+
+
+async def test_burst_stops_at_deadline() -> None:
+    """The last tick before the deadline re-probes but does not re-arm."""
+    controller = _reprobe_controller(_device())
+    loop = asyncio.get_running_loop()
+
+    firmware_sync._fire_version_reprobe(
+        controller, "kitchen.yaml", deadline=loop.time() - 1, interval=_INTERVAL
+    )
+
+    controller._state_monitor.api_info.request_reprobe.assert_called_once_with("kitchen")
+    assert controller._reprobe_timers == {}  # deadline passed, not re-armed
+
+
+async def test_burst_unknown_configuration_is_noop() -> None:
+    """The device vanished mid-burst → nothing to probe and no re-arm."""
+    controller = _reprobe_controller(None)
+    loop = asyncio.get_running_loop()
+
+    firmware_sync._fire_version_reprobe(controller, "kitchen.yaml", deadline=loop.time() + 1000)
+
+    controller._state_monitor.api_info.request_reprobe.assert_not_called()
     assert controller._reprobe_timers == {}
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -105,6 +106,17 @@ BOARD_PIN_KEYS: frozenset[str] = frozenset(
 # can't drift.
 DEVICE_IMPORT_SOURCE_TYPE = "esphome-devices"
 
+# ``source.type`` written by the esphome/bluetooth-proxies importer
+# (script/sync_bluetooth_proxies.py).
+BLUETOOTH_PROXY_IMPORT_SOURCE_TYPE = "bluetooth-proxies"
+
+# Every ``source.type`` an importer owns. Membership means "imported board":
+# the loader derives ``full_config`` from it, while each importer only
+# overwrites / prunes manifests carrying its own type.
+IMPORT_SOURCE_TYPES: frozenset[str] = frozenset(
+    {DEVICE_IMPORT_SOURCE_TYPE, BLUETOOTH_PROXY_IMPORT_SOURCE_TYPE}
+)
+
 # Generated catalog categories for ESPHome's buses (the ``_CATEGORY_OVERRIDES``
 # bus entries in script/sync_components.py). Mapping-style buses (i2c/spi/uart/
 # modbus) collapse to ``"bus"``; platform-style buses (one_wire/canbus) keep
@@ -114,3 +126,44 @@ DEVICE_IMPORT_SOURCE_TYPE = "esphome-devices"
 # the validator (script/validate_definitions.py, which checks they were lifted)
 # can't drift. Stdlib-only home, so neither script pulls in ``esphome``.
 BUS_CATEGORIES: frozenset[str] = frozenset({"bus", "one_wire", "canbus"})
+
+# Catalog categories that never appear as featured components — they belong in
+# the dedicated "Add core configuration" dialog, not board recommendations.
+# Shared by the importer (which must not lift such a component as a dependency
+# hub) and the validator (which rejects manifests featuring one). ``time`` is
+# deliberately absent: a page's ``time:`` platform is a hard dependency of
+# leaves like ``sensor.total_daily_energy``, so imports must carry it.
+FEATURED_EXCLUDED_CATEGORIES: frozenset[str] = frozenset({"core", "ota", "update"})
+
+# esphome ``Toolchain`` values, as the plain strings a StorageJSON sidecar
+# stores. Matched as strings rather than through ``esphome.const.Toolchain``
+# to keep this module a stdlib-only leaf; the wire values don't change.
+# Shared because the dashboard's spawn gate (``controllers/devices/
+# backtrace.py``), the helper child's idedata decision (``helper_cli.py``) and
+# the offload pack / unpack pair (``controllers/remote_build/
+# artifacts_tarball.py``, ``helpers/remote_artifacts_materialise.py``) encode
+# one contract and must agree; stdlib-only home, so the child pays nothing to
+# import it.
+TOOLCHAIN_ESP_IDF = "esp-idf"
+TOOLCHAIN_SDK_NRF = "sdk-nrf"
+
+
+class DecodeUnavailable(StrEnum):
+    """Why ``devices/decode_backtrace`` produced no frames.
+
+    A closed vocabulary on the wire, minted by both the dashboard and the
+    helper child and branched on by the frontend, so it lives in one place
+    rather than as literals in each. The host validates the child's reply
+    against it and maps anything else to ``HELPER_FAILED``, the same way a
+    malformed ``decoded`` is treated: a drift between the two is a broken
+    contract, not a new reason the client can act on.
+    """
+
+    NO_BACKTRACE = "no_backtrace"
+    NO_BUILD = "no_build"
+    # The ELF is here but the build tree it was compiled in is not, so nothing
+    # local can resolve addr2line.
+    ELF_ONLY = "elf_only"
+    UNSUPPORTED_PLATFORM = "unsupported_platform"
+    DECODE_FAILED = "decode_failed"
+    HELPER_FAILED = "helper_failed"

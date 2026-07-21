@@ -59,6 +59,12 @@ featured_components:
     id:
       value: bus_a
       locked: true
+- id: onboard_psram
+  component_id: psram
+  name: PSRAM
+  fields:
+    mode: quad
+    speed: 80MHz
 - id: binary_sensor_touchscreen_1
   component_id: binary_sensor.touchscreen
   fields:
@@ -96,6 +102,7 @@ featured_components:
     show_test_card: true
     id: display_mipi_spi_1
   requires:
+  - onboard_psram
   - spi_bus
 - id: sensor_mpu6886_1
   component_id: sensor.mpu6886
@@ -118,5 +125,5 @@ source:
   type: esphome-devices
   remote_id: M5Stack-Core2-V1.1
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/M5Stack-Core2-V1.1/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: f37b7c06e4e7b664c56bd6ac923f8a0176c069d14051653168dc2448a0237a5d

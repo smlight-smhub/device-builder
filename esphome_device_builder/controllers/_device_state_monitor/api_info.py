@@ -6,42 +6,42 @@ case) a device can be ONLINE via ping yet have a blank ``mac_address`` /
 ``deployed_version`` — those fields come only from the ``_esphomelib._tcp``
 TXT records. Each sweep first re-applies zeroconf-cached TXT payloads for
 free (the browser handler can miss an announce whose records still landed in
-the cache), then connects to still-blank devices over the Native API in a
+the cache), level-syncs the non-API ``deployed_identity_live`` freshness flag
+against the cached ``_http._tcp`` identity TXT, then connects to still-blank
+devices over the Native API in a
 short-lived subprocess. It only ever supplies the TXT-derived fields; it
 never drives ONLINE/OFFLINE, so it stays out of the source-precedence
-ledger.
+ledger. The one Native API path that does drive state is the last-resort
+revival in ``api_reviver.py``.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import importlib.util
 import logging
-import sys
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from ...helpers import json
-from ...helpers.device_yaml import DEFAULT_API_PORT
+from ...helpers.async_ import log_gather_failures
+from ...helpers.cooldown import CooldownLedger
 from ...helpers.hostname import is_local_hostname
-from ...helpers.subprocess import run_subprocess_capture
 from ...models import Device, DeviceState, ReachabilitySource
+from ._api_probe import (
+    ApiSweepSource,
+    ProbeError,
+    api_worker_available,
+    apply_worker_info,
+)
+from .helpers import _HTTP_SERVICE_TYPE
 
 if TYPE_CHECKING:
     from .controller import DeviceStateMonitor
 
 _LOGGER = logging.getLogger(__name__)
 
-_WORKER_MODULE = "esphome_device_builder.helpers.api_device_info"
-_INTERVAL = 60  # seconds between fallback sweeps
-# Give mDNS a head start so devices that announce normally fill
-# mac/version for free and never trigger a connection.
-_BOOTSTRAP_DELAY = 15
 # Per-device backoff after a failed fetch so an unreachable / wrong-key
 # / non-API device isn't reconnected every sweep.
 _FAILURE_COOLDOWN = 600  # seconds
-_SUBPROCESS_TIMEOUT = 15.0
 # Max devices probed per sweep. Each probe is serial and can run the full
 # subprocess timeout, so an mDNS-dark all-failing fleet would otherwise spawn
 # interpreters back-to-back for minutes; the overflow rolls to the next sweep.
@@ -53,60 +53,43 @@ _MAX_PROBES_PER_SWEEP = 8
 _SYSTEMIC_FAILURE_WARN_THRESHOLD = 10
 
 
-class ApiInfoSource:
+class ApiInfoSource(ApiSweepSource):
     """Fill mac/version via the Native API when mDNS hasn't supplied them."""
 
+    _label = "API info sweep"
+    # Give mDNS a head start so devices that announce normally fill
+    # mac/version for free and never trigger a connection.
+    _bootstrap_delay = 15
+
     def __init__(self, monitor: DeviceStateMonitor) -> None:
-        self._monitor = monitor
-        self._wake = asyncio.Event()
-        # name -> monotonic deadline before which we won't retry a fetch.
-        self._cooldown: dict[str, float] = {}
+        super().__init__(monitor)
+        # Names we won't refetch until their cooldown expires.
+        self._cooldown: CooldownLedger[str] = CooldownLedger()
         # Device names to probe once even though they already have mac+version
         # (post-flash version verification); cleared after one probe attempt.
         self._force_reprobe: set[str] = set()
         # One-shot latch for the systemic WARNING; re-arms once the count of
         # distinct devices stuck failing drops back below the threshold.
         self._warned_systemic = False
-        # Re-checked by ``run``; without aioesphomeapi the sweep still runs
-        # its mDNS-cache reconcile but skips the API-connect stage.
+        # Re-checked by ``_prepare``; without aioesphomeapi the sweep still
+        # runs its mDNS-cache reconcile but skips the API-connect stage.
         self._api_available = True
-        if monitor._presence is not None:
-            monitor._presence.add_subscriber_callback(self._wake.set)
 
     def request_reprobe(self, name: str) -> None:
         """Force one probe of *name* on the next sweep, ignoring the mac+version guard."""
         self._force_reprobe.add(name)
-        self._wake.set()
+        self.wake()
 
-    async def run(self) -> None:
-        # ``find_spec`` resolves without importing, so ``aioesphomeapi``
-        # never loads into the dashboard process — only the per-fetch
-        # worker child imports it. The sweep loop still runs without it:
-        # the mDNS-cache reconcile pass needs no API worker.
-        self._api_available = importlib.util.find_spec("aioesphomeapi") is not None
+    async def _prepare(self) -> bool:
+        # The sweep loop still runs without the worker library: the
+        # mDNS-cache reconcile pass needs no API worker.
+        self._api_available = api_worker_available()
         if not self._api_available:
             _LOGGER.debug(
                 "aioesphomeapi not installed; Native API connect stage disabled "
                 "(mDNS-cache reconcile still active)"
             )
-        await asyncio.sleep(_BOOTSTRAP_DELAY)
-        monitor = self._monitor
-        while True:
-            if monitor._presence is not None:
-                await monitor._presence.wait_for_subscriber()
-            self._wake.clear()
-            try:
-                await self._sweep()
-            except Exception:
-                # A failure outside the per-device guard (``_select_targets``,
-                # the cooldown prune, the health check) must not kill the loop
-                # for the process lifetime; log it and try again next interval.
-                _LOGGER.exception("API info sweep failed; continuing")
-            await self._idle()
-
-    async def _idle(self) -> None:
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(self._wake.wait(), timeout=_INTERVAL)
+        return True
 
     async def _sweep(self) -> None:
         # Strictly one probe at a time: an API connect is far heavier
@@ -114,13 +97,14 @@ class ApiInfoSource:
         # not a fleet sweep — serialising keeps it unobtrusive.
         devices = self._monitor._get_devices()
         live = {device.name for device in devices}
-        self._cooldown = {name: t for name, t in self._cooldown.items() if name in live}
+        self._cooldown.prune(live.__contains__)
         self._force_reprobe &= live
         # Free repair first: a device the browser handler missed (timed-out
         # resolve, cold-start probe no-op) sits blank while the zeroconf cache
         # holds its TXT, and same-content TTL refreshes never re-fire the
         # handler. Devices the cache fills drop out of ``_select_targets``.
         self._reconcile_from_mdns_cache(devices)
+        await self._sync_http_identity_liveness(devices)
         if not self._api_available:
             return
         # Cap probes per sweep so an mDNS-dark fleet where every probe runs
@@ -152,19 +136,20 @@ class ApiInfoSource:
         self._evaluate_systemic_health()
 
     def _reconcile_from_mdns_cache(self, devices: list[Device]) -> None:
-        """Re-apply cached TXT payloads for online API devices missing monitor fields."""
+        """Re-apply cached TXT payloads for online devices missing monitor fields."""
         monitor = self._monitor
         # ``deployed_config_hash`` and the ``api_encryption_active``
         # tri-state (``None`` = never observed) widen this gate beyond
         # ``_is_due``'s mac+version: the cached TXT carries them but the
-        # API worker can't fetch them.
+        # API worker can't fetch them. A non-API device is served by the
+        # ``_http._tcp`` identity TXT instead, which carries no
+        # api_encryption, so only the identity fields gate it.
         names = {
             device.name
             for device in devices
             if device.runtime_state.state is DeviceState.ONLINE
-            and device.api_enabled
             and (
-                device.runtime_state.api_encryption_active is None
+                (device.api_enabled and device.runtime_state.api_encryption_active is None)
                 or not (
                     device.mac_address
                     and device.runtime_state.deployed_version
@@ -173,7 +158,51 @@ class ApiInfoSource:
             )
         }
         for name in sorted(names):
-            monitor.reconcile_from_mdns_cache(name)
+            monitor.mdns.reconcile_from_cache(name)
+
+    async def _sync_http_identity_liveness(self, devices: list[Device]) -> None:
+        """
+        Level-sync ``deployed_identity_live`` against the cached ``_http._tcp`` identity TXT.
+
+        Stamp-side repair goes through ``reconcile_from_cache`` (not a
+        bare flag write) so a device re-flashed while the dashboard was
+        down also refreshes its *populated* identity fields, which the
+        missing-field reconcile gate above never revisits. Clear-side
+        is verify-before-demote and requires a cached mDNS trace: an
+        mDNS-dark deployment (where the post-flash stamp is the only
+        evidence) gains no multicast traffic, so a wire miss there
+        proves nothing. Deliberately not ONLINE-gated like the stage
+        above: the flag states the TXT's freshness, not reachability,
+        so an OFFLINE device's flag tracks its cached TXT the same way.
+        """
+        mdns = self._monitor.mdns
+        if mdns.zeroconf is None:
+            return
+        stamp: set[str] = set()
+        verify: set[str] = set()
+        for device in devices:
+            if device.api_enabled:
+                continue
+            if mdns.has_live_http_identity_txt(device.name):
+                if not device.runtime_state.deployed_identity_live:
+                    stamp.add(device.name)
+            elif device.runtime_state.deployed_identity_live and mdns.has_cached_trace(
+                device.name, service_type=_HTTP_SERVICE_TYPE
+            ):
+                verify.add(device.name)
+        for name in sorted(stamp):
+            mdns.reconcile_from_cache(name)
+        if verify:
+            # Same per-sweep bound as the API probes: a whole-fleet cache
+            # expiry (suspend/wake) must not burst hundreds of concurrent
+            # wire resolves. The overflow stays flag-True and re-qualifies
+            # next sweep.
+            targets = sorted(verify)[:_MAX_PROBES_PER_SWEEP]
+            results = await asyncio.gather(
+                *(mdns.verify_http_identity(name) for name in targets),
+                return_exceptions=True,
+            )
+            log_gather_failures(results, "http identity verify failed; continuing")
 
     def _is_due(self, device: Device) -> bool:
         """
@@ -215,7 +244,7 @@ class ApiInfoSource:
             device
             for device in self._monitor._get_devices()
             if self._is_due(device)
-            and (device.name in self._force_reprobe or self._cooldown.get(device.name, 0.0) <= now)
+            and (device.name in self._force_reprobe or self._cooldown.ready(device.name, now))
         ]
 
     @staticmethod
@@ -251,41 +280,19 @@ class ApiInfoSource:
             # list after selection. Back off rather than indexing an empty list.
             self._record_failure(device)
             return
-        noise_psk, port = "", DEFAULT_API_PORT
-        if monitor._resolve_api_connection is not None:
-            try:
-                noise_psk, port = await monitor._resolve_api_connection(device.configuration)
-            except Exception as exc:  # noqa: BLE001 — can't resolve how to reach the device
-                # A plaintext/default guess would only fail the handshake;
-                # record the miss instead of spawning a doomed worker.
-                _LOGGER.debug("API key/port resolve failed for %s; skipping: %s", device.name, exc)
-                self._record_failure(device)
-                return
-        if device.api_encrypted and not noise_psk:
-            # The config declares Noise encryption but no key resolved (e.g. a
-            # templated key) — a plaintext connect can only fail the handshake.
-            _LOGGER.debug("No Native API key resolved for encrypted %s; skipping", device.name)
+        try:
+            info = await self._probe(device, addresses) or {}
+        except ProbeError:
+            # Transient vs definitive doesn't change this source's
+            # handling — both are one cooldown.
             self._record_failure(device)
             return
-        request = json.dumps(
-            {
-                "address": addresses[0],
-                "port": port,
-                "noise_psk": noise_psk,
-                "addresses": addresses,
-            }
-        )
-        info = await self._run_worker(device, request) or {}
-        # ``apply_*`` returns True iff it newly wrote the field. Judge on that,
-        # not a post-apply Device re-read (apply dedupes / fans out across
-        # same-named devices). Any newly-filled field means the connection
-        # worked and made progress: don't cool down, so a device that answered
-        # with mac XOR version chases the rest on the next normal sweep. Nothing
-        # newly filled (connect failed, or only a value we already had) is a
-        # real miss → cool the device down.
-        filled_mac = monitor.apply_mac_address(device.name, info.get("mac_address", ""))
-        filled_version = monitor.apply_version(device.name, info.get("esphome_version", ""))
-        if filled_mac or filled_version:
+        # Any newly-filled field means the connection worked and made
+        # progress: don't cool down, so a device that answered with mac
+        # XOR version chases the rest on the next normal sweep. Nothing
+        # newly filled (connect failed, or only a value we already had)
+        # is a real miss → cool the device down.
+        if apply_worker_info(monitor, device.name, info):
             return
         # A forced re-probe that connected (``info`` truthy) but changed
         # nothing confirmed the existing version — a success, not a miss, so
@@ -298,7 +305,7 @@ class ApiInfoSource:
 
     def _record_failure(self, device: Device) -> None:
         """Back *device* off so the next sweep skips it until the cooldown expires."""
-        self._cooldown[device.name] = time.monotonic() + _FAILURE_COOLDOWN
+        self._cooldown.set(device.name, _FAILURE_COOLDOWN)
 
     def _evaluate_systemic_health(self) -> None:
         """
@@ -314,7 +321,7 @@ class ApiInfoSource:
         failing = sum(
             1
             for device in self._monitor._get_devices()
-            if self._is_due(device) and self._cooldown.get(device.name, 0.0) > now
+            if self._is_due(device) and not self._cooldown.ready(device.name, now)
         )
         if failing < _SYSTEMIC_FAILURE_WARN_THRESHOLD:
             self._warned_systemic = False
@@ -327,41 +334,3 @@ class ApiInfoSource:
                 "and the api.port setting",
                 failing,
             )
-
-    async def _run_worker(self, device: Device, request: bytes) -> dict[str, Any] | None:
-        try:
-            result = await run_subprocess_capture(
-                sys.executable,
-                "-m",
-                _WORKER_MODULE,
-                timeout=_SUBPROCESS_TIMEOUT,
-                stdin_data=request,
-                merge_stderr=False,
-            )
-        except OSError as exc:
-            _LOGGER.debug("Failed to spawn API info worker for %s: %s", device.name, exc)
-            return None
-        if result.timed_out:
-            _LOGGER.debug("API info fetch for %s timed out", device.name)
-            return None
-        try:
-            parsed = json.loads(result.stdout) if result.stdout else None
-        except (json.JSONDecodeError, ValueError):
-            _LOGGER.debug(
-                "API info worker for %s emitted unparsable output: %r", device.name, result.stdout
-            )
-            return None
-        # The worker exits 0 with ``{mac_address, version}`` on success and
-        # non-zero with ``{"error": <reason>}`` on a connect/handshake
-        # failure — surface that reason so the dominant failure mode is
-        # diagnosable instead of silently missing.
-        if result.returncode != 0 or not isinstance(parsed, dict):
-            reason = parsed.get("error") if isinstance(parsed, dict) else None
-            _LOGGER.debug(
-                "API info worker for %s failed (rc=%s): %s",
-                device.name,
-                result.returncode,
-                reason or "no usable output",
-            )
-            return None
-        return parsed

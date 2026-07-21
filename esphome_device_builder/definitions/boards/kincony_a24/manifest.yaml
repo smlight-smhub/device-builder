@@ -63,6 +63,15 @@ featured_components:
     id:
       value: spi_bus0
       locked: true
+- id: my_gp8403
+  component_id: gp8403
+  fields:
+    voltage: 10V
+    id:
+      value: my_gp8403
+      locked: true
+  requires:
+  - bus_a
 - id: bus_a
   component_id: i2c
   fields:
@@ -527,11 +536,17 @@ featured_components:
   fields:
     channel: 0
     id: gp8403_output_1
+  requires:
+  - bus_a
+  - my_gp8403
 - id: gp8403_output_2
   component_id: output.gp8403
   fields:
     channel: 1
     id: gp8403_output_2
+  requires:
+  - bus_a
+  - my_gp8403
 - id: sensor_adc_1
   component_id: sensor.adc
   fields:
@@ -561,6 +576,10 @@ featured_components:
     update_interval: 10s
     unit_of_measurement: mA
     attenuation: 11db
+    filters:
+      value:
+      - multiply: 6.66666666
+      locked: true
     id: sensor_adc_3
     name: A24 A3 Current
 - id: sensor_adc_4
@@ -572,6 +591,10 @@ featured_components:
     update_interval: 10s
     unit_of_measurement: mA
     attenuation: 11db
+    filters:
+      value:
+      - multiply: 6.66666666
+      locked: true
     id: sensor_adc_4
     name: A24 A4 Current
 - id: sensor_max31855_1
@@ -989,16 +1012,20 @@ featured_bundles:
 - id: light_monochromatic_1_setup
   name: A24-DAC-1 (full setup)
   component_ids:
+  - bus_a
+  - my_gp8403
   - gp8403_output_1
   - light_monochromatic_1
 - id: light_monochromatic_2_setup
   name: A24-DAC-2 (full setup)
   component_ids:
+  - bus_a
+  - my_gp8403
   - gp8403_output_2
   - light_monochromatic_2
 source:
   type: esphome-devices
   remote_id: KinCony-A24
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/KinCony-A24/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: f19ed0d73c2099cd40699e672e0f36a3f45a1c74a170ee3749b3105ac481eeac

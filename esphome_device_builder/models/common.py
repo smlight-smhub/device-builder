@@ -95,6 +95,8 @@ class EventType(StrEnum):
 
     # Receiver rotated its X25519 peer-link identity
     REMOTE_BUILD_IDENTITY_ROTATED = "remote_build_identity_rotated"
+    # Receiver peer-link listener bound / torn down (advertised address changed)
+    REMOTE_BUILD_LISTENER_CHANGED = "remote_build_listener_changed"
     # pair_request landed for an unknown peer while pairing window open
     REMOTE_BUILD_PAIR_REQUEST_RECEIVED = "remote_build_pair_request_received"
     # Receiver-side peer status change (approved/removed)
@@ -307,12 +309,16 @@ class ConfigValueOption(DashboardModel):
 
     label: str
     value: str
+    # Prose explaining the choice, rendered as secondary text under the
+    # label. Set when the schema's per-value docs read as a sentence
+    # rather than a label.
+    description: str | None = None
     # ESP32 variants that accept this value (lowercased ``esp32s3``); empty =
     # every variant. Lets the editor filter a per-variant enum by the device.
     variants: list[str] = field(default_factory=list)
 
     class Config(_CatalogConfig):
-        """Omit empty ``variants``; see :class:`_CatalogConfig`."""
+        """Omit empty ``variants`` / ``description``; see :class:`_CatalogConfig`."""
 
 
 class RequiredGroupKind(StrEnum):

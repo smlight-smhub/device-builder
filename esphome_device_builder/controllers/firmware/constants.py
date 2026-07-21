@@ -25,6 +25,13 @@ from ...models import JobType
 # ``.device-builder.json``.
 _JOBS_KEY = "_firmware_jobs"
 
+# Upload-lane worker count — how many normal network flashes run at
+# once. Each flash is a full esphome subprocess tree; the cap bounds
+# their combined memory on small hosts. OpenThread flashes don't count
+# against it — they serialize on their own single-slot lane — so peak
+# concurrency is this plus one thread flash.
+MAX_CONCURRENT_UPLOADS = 3
+
 # Output patterns that indicate failure even when the subprocess
 # exit code is 0. Bare ``No module named`` is intentionally absent:
 # PlatformIO's ``[nanopb]`` extra-script emits it harmlessly (#918);
@@ -107,15 +114,14 @@ _PROGRESS_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 # ESP-IDF / ninja per-target counter: ``[907/1424] Building C object …``.
 # Kept out of ``_PROGRESS_PATTERNS`` because it carries no percentage —
-# ``_parse_progress`` derives one from the two capture groups. Anchored
+# ``_ninja_progress`` derives one from the two capture groups. Anchored
 # to the line start and to ninja's literal space after the ``]`` so
 # mid-line ``[N/M]`` text and bare bracketed fragments never trip it;
 # the start anchor tolerates ANSI CSI prefixes (``\x1b[2K`` etc.) —
-# same production concern as the ``Writing at`` pattern above. Counters
-# with totals under ``_NINJA_MIN_TOTAL`` are ignored: ``[1/2]
-# Re-running CMake...`` sub-steps and the ~97-step bootloader
-# ExternalProject sub-build would otherwise spike the gauge to ~100
-# before the app build starts.
+# same production concern as the ``Writing at`` pattern above. The
+# ``_NINJA_MIN_TOTAL`` floor drops tiny sub-steps (``[1/2] Re-running
+# CMake...``); ExternalProject sub-builds of any size are kept off the
+# gauge by ``_ninja_progress``'s largest-total gate.
 _NINJA_MIN_TOTAL = 100
 _NINJA_PROGRESS_PATTERN: re.Pattern[str] = re.compile(
     r"^(?:\x1b\[[0-9;]*[A-Za-z])*\s*\[\s*(\d+)\s*/\s*(\d+)\s*\] "
@@ -156,8 +162,13 @@ _COMPILE_BRACKET_PERCENT: re.Pattern[str] = re.compile(r"^\s*\[\s*\d{1,3}\s*%\s*
 
 # PlatformIO closes each environment with ``===== [SUCCESS] Took N seconds =====``
 # (or ``[FAILED]``); marks ``compile_ended_at`` so an install's flash phase,
-# which streams after, isn't counted.
-_COMPILE_END_PATTERN: re.Pattern[str] = re.compile(r"\[(?:SUCCESS|FAILED)\] Took ")
+# which streams after, isn't counted. esp-idf's native (non-pio) build prints
+# no banner — there esphome's own ``Successfully compiled program`` INFO line
+# (emitted right after ninja returns) closes the span, and ninja's
+# ``ninja: build stopped: subcommand failed.`` closes a failed build.
+_COMPILE_END_PATTERN: re.Pattern[str] = re.compile(
+    r"\[(?:SUCCESS|FAILED)\] Took |Successfully compiled program|ninja: build stopped"
+)
 
 # History retention.
 #   - "Primary" = COMPILE / UPLOAD / INSTALL: dedup'd to the most

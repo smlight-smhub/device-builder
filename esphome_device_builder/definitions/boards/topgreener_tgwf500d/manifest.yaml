@@ -9,8 +9,30 @@ hardware:
   - wifi
 images:
 - https://raw.githubusercontent.com/esphome/devices.esphome.io/main/src/docs/devices/Topgreener-TGWF500D/Topgreener-TGWF500D.png
+pins:
+- gpio: 13
+  available: false
+  occupied_by: uart
+- gpio: 15
+  available: false
+  occupied_by: uart
 docs_url: https://devices.esphome.io/devices/Topgreener-TGWF500D/
 featured_components:
+- id: uart_bus
+  component_id: uart
+  fields:
+    rx_pin:
+      value: 13
+      locked: true
+    tx_pin:
+      value: 15
+      locked: true
+    baud_rate: 9600
+- id: tuya_hub
+  component_id: tuya
+  fields: {}
+  requires:
+  - uart_bus
 - id: light_tuya_1
   component_id: light.tuya
   fields:
@@ -19,16 +41,19 @@ featured_components:
     min_value: 10
     max_value: 255
     id: light_tuya_1
-    name: Tuya 1
+    name: Family Room Light
+  requires:
+  - uart_bus
+  - tuya_hub
 - id: sensor_wifi_signal_1
   component_id: sensor.wifi_signal
   fields:
     update_interval: 60s
     id: sensor_wifi_signal_1
-    name: WiFi Signal
+    name: Family Room Light WiFi Signal
 source:
   type: esphome-devices
   remote_id: Topgreener-TGWF500D
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Topgreener-TGWF500D/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 31c68de52d2b24e0e2c9abf235b5aab8b81791b83a6ff84d758baec8dd21c191

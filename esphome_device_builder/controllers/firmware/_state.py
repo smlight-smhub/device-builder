@@ -3,24 +3,27 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 
 from ...models import FirmwareJob, JobSource, JobStatus, JobType
+from .constants import MAX_CONCURRENT_UPLOADS
 
 
 @dataclass
 class Lane:
-    """One serial work lane: its FIFO queue + the job/subprocess on it now.
+    """One work lane: its FIFO queue + the jobs occupying its slots now.
 
-    Two lanes run concurrently — a compile lane (CPU) and an upload lane
-    (network) — so a slow network flash doesn't block the next compile.
-    Within a lane work stays serialized (``current_job`` is the single slot).
+    Lanes run concurrently — a compile lane (CPU), an upload lane
+    (network), and a serialized OpenThread upload lane — so a slow
+    network flash doesn't block the next compile or flash.
+    ``max_concurrency`` workers drain the queue; ``active`` holds the
+    jobs currently running on the lane, keyed by ``job_id``.
     """
 
+    max_concurrency: int = 1
     queue: asyncio.Queue[FirmwareJob] = field(default_factory=asyncio.Queue)
-    current_job: FirmwareJob | None = None
-    current_process: asyncio.subprocess.Process | None = None
+    active: dict[str, FirmwareJob] = field(default_factory=dict)
 
 
 @dataclass
@@ -107,11 +110,26 @@ class FirmwareState:
     # picks first. ``cli`` reads it to build the subprocess argv.
     esphome_cmd: list[str] = field(default_factory=list)
 
-    # The two concurrent lanes. Producers enqueue onto the lane a job's
-    # type maps to (``_lane_for``); each lane has its own consumer task.
-    # Both survive restarts via the on-disk persistence layer.
+    # The concurrent lanes. Producers enqueue onto the lane ``lane_for``
+    # maps a job to; each lane spawns ``max_concurrency`` worker tasks.
+    # All survive restarts via the on-disk persistence layer. The thread
+    # lane stays single-slot: OpenThread devices share one mesh / border
+    # router, and concurrent OTAs over the mesh starve each other. The
+    # slot is deliberately global, not per-mesh — keying on mesh identity
+    # needs membership data the dashboard doesn't have.
     compile_lane: Lane = field(default_factory=Lane)
-    upload_lane: Lane = field(default_factory=Lane)
+    upload_lane: Lane = field(default_factory=lambda: Lane(max_concurrency=MAX_CONCURRENT_UPLOADS))
+    thread_upload_lane: Lane = field(default_factory=Lane)
+
+    # Injected by the controller at construction: sync RAM lookup for
+    # "does this configuration's device load ``openthread``". Default
+    # False routes every flash to the normal upload lane.
+    is_thread_configuration: Callable[[str], bool] = field(default=lambda _configuration: False)
+
+    # Subprocesses spawned for running jobs, keyed by ``job_id`` — what
+    # ``firmware/cancel`` signals. Job-keyed rather than per-lane so an
+    # off-lane spawn (the remote-install local flash) is cancellable too.
+    processes: dict[str, asyncio.subprocess.Process] = field(default_factory=dict)
 
     # Active + recent jobs keyed by ``job_id``. ``persistence``
     # reads / writes on every state transition; ``clean``,
@@ -141,9 +159,24 @@ class FirmwareState:
     # Remote build-server pool (see :class:`RemoteDispatchState`).
     remote_dispatch: RemoteDispatchState = field(default_factory=RemoteDispatchState)
 
+    def lanes(self) -> tuple[Lane, ...]:
+        """Every lane, for slot scans and worker spawn."""
+        return (self.compile_lane, self.upload_lane, self.thread_upload_lane)
+
     def lane_for(self, job: FirmwareJob) -> Lane:
-        """Return *job*'s lane: network flashes (UPLOAD, rename tail) upload, else compile."""
-        return self.upload_lane if job.is_network_flash else self.compile_lane
+        """
+        Return *job*'s lane: everything but a network flash (UPLOAD, rename tail) compiles.
+
+        A flash of an OpenThread device serializes on the thread lane;
+        keyed on ``configuration`` (not ``flash_configuration``) because
+        a rename tail's *old* name is the one with a Device entry and
+        mesh membership is a property of the physical device.
+        """
+        if not job.is_network_flash:
+            return self.compile_lane
+        if self.is_thread_configuration(job.configuration):
+            return self.thread_upload_lane
+        return self.upload_lane
 
     def place_on_lane(self, job: FirmwareJob) -> None:
         """Route *job* to its worker: the remote pool for a pending remote compile, else its lane.
@@ -190,16 +223,18 @@ class FirmwareState:
 
         A clean/reset rmtree's build artifacts that ``esphome upload`` reads;
         since they run on separate lanes, an unguarded upload could flash a
-        truncated binary mid-wipe. RESET_BUILD_ENV (whole tree) blocks every
-        flash; a CLEAN blocks only the flash reading its configuration's
-        build tree — for a rename tail that's the *new* filename's.
+        truncated binary mid-wipe. Only jobs wiping the *local* tree gate
+        (``wipes_local_build_tree`` — a REMOTE clean/reset targets the paired
+        receiver's tree): a RESET_BUILD_ENV (whole tree) blocks every flash, a
+        CLEAN only the flash reading its configuration's build tree — for a
+        rename tail that's the *new* filename's.
         """
         if not job.is_network_flash:
             return False
         guarded = job.flash_configuration
         for other in self.active_jobs():
-            if other.job_type is JobType.RESET_BUILD_ENV:
-                return True
-            if other.job_type is JobType.CLEAN and other.configuration == guarded:
+            if not other.wipes_local_build_tree:
+                continue
+            if other.job_type is JobType.RESET_BUILD_ENV or other.configuration == guarded:
                 return True
         return False

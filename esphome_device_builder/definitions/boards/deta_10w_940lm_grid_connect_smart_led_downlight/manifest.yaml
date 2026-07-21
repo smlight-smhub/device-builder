@@ -39,7 +39,7 @@ featured_components:
     warm_white: output_ww
     cold_white: output_cw
     id: light_rgbww_1
-    name: Rgbww 1
+    name: Master Bedroom Light 1
 - id: output_g
   component_id: output.esp8266_pwm
   fields:
@@ -77,7 +77,7 @@ featured_components:
     id: output_cw
 featured_bundles:
 - id: light_rgbww_1_setup
-  name: Rgbww (full setup)
+  name: Master Bedroom Light 1 (full setup)
   component_ids:
   - output_r
   - output_g
@@ -89,5 +89,5 @@ source:
   type: esphome-devices
   remote_id: Deta-10W-940lm-Grid-Connect-Smart-LED-Downlight
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Deta-10W-940lm-Grid-Connect-Smart-LED-Downlight/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: b56c80588b47b334a06aa5925bf67ef7be7b99336e28cd338e9bc0a4fcd48ff5

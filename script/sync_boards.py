@@ -23,18 +23,21 @@ The YAML manifests under ``definitions/boards/<id>/manifest.yaml``
 remain the human-editable source of truth; this script is the only
 thing that writes the three artefacts.
 
-Single-board mode (``BOARD_ID``) must run against the same ESPHome the
-rest of the committed catalog was generated against (the
-``esphome_version`` a full sync stamps into ``boards.index.json``),
-since it rebuilds the shared index from every board; it refuses on a
-mismatch. A full sync regenerates everything from the installed ESPHome
-and re-stamps that version, so it does not check.
+Both modes must run against the same ESPHome the committed catalog was
+generated against (the ``esphome_version`` a full sync stamps into
+``boards.index.json``): single-board mode rebuilds the shared index from
+every board, and a full sync rewrites every body, so either drifts the
+whole catalog on a mismatch. Both refuse unless the versions match;
+``--restamp`` lets a full sync intentionally regenerate against the
+installed ESPHome and re-stamp that version (the catalog-sync workflows'
+esphome-bump path).
 
 Usage
 -----
 
     python script/sync_boards.py              # regenerate every board
     python script/sync_boards.py BOARD_ID     # regenerate only one board
+    python script/sync_boards.py --restamp    # regenerate against a new ESPHome
 """
 
 from __future__ import annotations
@@ -59,11 +62,14 @@ sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _catalog_split import (  # noqa: E402
+    dumps_envelope_entries_per_line,
+    dumps_map_entry_per_line,
     emit_body_with_roundtrip,
     prepare_next_bodies_dir,
     swap_split_catalog_in,
 )
 from _esphome_version import assert_installed_esphome  # noqa: E402
+from _manifest import ManifestError, load_manifest_dict  # noqa: E402
 
 from esphome_device_builder.constants import BOARD_PIN_KEYS  # noqa: E402
 from esphome_device_builder.definitions import (  # noqa: E402
@@ -102,6 +108,8 @@ _INDEX_DROP_FIELDS: frozenset[str] = frozenset(
         "featured_bundles",
         "default_components",
         "full_config",
+        "package_import_url",
+        "package_name",
     }
 )
 
@@ -622,23 +630,84 @@ def _esp32_board_pins(generic: list[BoardPin], board_pins: dict[str, int] | None
     return out
 
 
+def esp32_variant_for_board(board_id: str) -> str | None:
+    """Variant name for a PIO board id from esphome's authoritative ``BOARDS`` map."""
+    module = importlib.import_module(_ESP32_BOARDS_MODULE)
+    board_list: dict[str, Any] = getattr(module, _ESP32_BOARDS_ATTR)
+    meta = board_list.get(board_id)
+    return meta["variant"].lower() if meta is not None else None
+
+
 def _backfill_esp32_variants(boards: list[BoardCatalogEntry]) -> None:
     """Fill ``esphome.variant`` from the PIO board id for esp32 boards missing it.
 
     Imported manifests sometimes carry only ``board:`` (no ``variant:``). Without
     a variant the generated ``esp32:`` block has neither key (the schema needs at
     least one) and the picker tags the board as bare ESP32 instead of its
-    sub-variant. ``BOARDS`` is the authoritative board -> variant map.
+    sub-variant.
     """
-    module = importlib.import_module(_ESP32_BOARDS_MODULE)
-    board_list: dict[str, Any] = getattr(module, _ESP32_BOARDS_ATTR)
     for board in boards:
         cfg = board.esphome
         if cfg.platform.value != "esp32" or cfg.variant is not None:
             continue
-        meta = board_list.get(cfg.board)
-        if meta is not None:
-            cfg.variant = Esp32Variant(meta["variant"].lower())
+        variant = esp32_variant_for_board(cfg.board)
+        if variant is not None:
+            cfg.variant = Esp32Variant(variant)
+
+
+def _backfill_donor_pins(
+    boards: list[BoardCatalogEntry],
+    pins_from: dict[str, str] | None = None,
+) -> None:
+    """Fill a pin-less board from its donor's pin table.
+
+    An explicit manifest ``pins_from`` names the donor by id (read from the
+    manifests when not injected); otherwise the unique same-chip
+    ``is_generic`` donor applies. An absent or ambiguous donor leaves the
+    table empty; validate_definitions is the loud gate for a bad reference.
+    """
+    if pins_from is None:
+        pins_from = _manifest_pins_from()
+    by_id = {board.id: board for board in boards}
+    # Chip compatibility of an explicit donor is validate_definitions'
+    # job; this stage only refuses to overwrite an existing table.
+    for board_id, donor_id in pins_from.items():
+        board = by_id.get(board_id)
+        donor = by_id.get(donor_id)
+        if board is not None and not board.pins and donor is not None and donor.pins:
+            board.pins = list(donor.pins)
+
+    def _chip(cfg: BoardEsphomeConfig) -> tuple[str, str, str | None]:
+        return (cfg.platform.value, cfg.board, cfg.variant.value if cfg.variant else None)
+
+    donors: dict[tuple[str, str, str | None], list[BoardCatalogEntry]] = {}
+    for board in boards:
+        if board.is_generic and board.pins:
+            donors.setdefault(_chip(board.esphome), []).append(board)
+    for board in boards:
+        if board.pins:
+            continue
+        matched = donors.get(_chip(board.esphome), [])
+        if len(matched) == 1:
+            board.pins = list(matched[0].pins)
+
+
+def _manifest_pins_from() -> dict[str, str]:
+    """``{board_id: donor_id}`` for every manifest carrying ``pins_from``."""
+    out: dict[str, str] = {}
+    for manifest in sorted((_DEFINITIONS_DIR / "boards").glob("*/manifest.yaml")):
+        try:
+            data = load_manifest_dict(manifest)
+        except ManifestError as exc:
+            # validate_definitions is the hard gate; still say why a board's
+            # pins_from inheritance silently vanished from this sync run.
+            _LOGGER.warning("Skipping unreadable manifest %s: %s", manifest, exc)
+            continue
+        donor = data.get("pins_from")
+        if isinstance(donor, str):
+            # Folder name is the canonical id (schema-enforced equal).
+            out[str(data.get("id") or manifest.parent.name)] = donor
+    return out
 
 
 def _augment_esp32_boards(boards: list[BoardCatalogEntry]) -> None:
@@ -1180,6 +1249,9 @@ def build_catalog() -> BoardCatalogResponse:
     _backfill_esp32_engineering_sample(catalog.boards)
     _augment_esp8266_boards(catalog.boards)
     _augment_nrf52_boards(catalog.boards)
+    # Last pin-FILLING pass — a filler inserted after it would find its
+    # empty-pin targets already claimed; the passes below only decorate.
+    _backfill_donor_pins(catalog.boards)
     _augment_rmii_data_pins(catalog.boards)
     _stamp_featured_locked_pins(catalog.boards)
     _stamp_featured_requires(catalog.boards)
@@ -1199,12 +1271,24 @@ def main() -> int:
         help="Board id (the folder name under esphome_device_builder/definitions/boards/) "
         "to regenerate on its own. Omit to regenerate the whole catalog.",
     )
+    parser.add_argument(
+        "--restamp",
+        action="store_true",
+        help="Full sync only: regenerate every board against the installed ESPHome even "
+        "when it does not match the esphome_version stamped in boards.index.json, "
+        "re-stamping that version.",
+    )
     args = parser.parse_args()
 
-    # Only single-board mode needs the match: it rebuilds the shared index from
-    # every board, so a mismatched esphome drifts the others' index entries.
+    # Either mode drifts the whole catalog on a version mismatch: single-board
+    # rebuilds the shared index from every board, a full sync rewrites every
+    # body. --restamp is the explicit opt-in for the intentional full regen.
     if args.board:
+        if args.restamp:
+            parser.error("--restamp applies to the full sync only; drop the board id")
         _require_matching_esphome()
+    elif not args.restamp:
+        _require_matching_esphome_full()
 
     # Abort the sync on the first bad manifest — partial output here
     # would silently ship a board-shaped hole to every install.
@@ -1296,8 +1380,6 @@ def _emit_split_catalog(
         index_payload=_index_payload(full_payloads),
         live_index=_INDEX_FILE,
         index_cls=BoardCatalogIndex,
-        index_entries_key="boards",
-        sort_keys=True,
     )
 
 
@@ -1336,29 +1418,57 @@ def _write_index(full_payloads: list[dict[str, Any]]) -> None:
     for entry in index_payload["boards"]:
         BoardCatalogIndex.from_dict(entry)
     next_index = _INDEX_FILE.with_suffix(".json.next")
-    next_index.write_bytes(
-        orjson.dumps(index_payload, option=orjson.OPT_SORT_KEYS | orjson.OPT_APPEND_NEWLINE)
-    )
+    next_index.write_bytes(dumps_envelope_entries_per_line(index_payload))
     next_index.replace(_INDEX_FILE)
+
+
+def _committed_esphome_stamp() -> str | None:
+    """Return the ``esphome_version`` stamped in boards.index.json, or None if unreadable."""
+    try:
+        stamp = orjson.loads(_INDEX_FILE.read_bytes())["esphome_version"]
+    except (OSError, orjson.JSONDecodeError, KeyError):
+        return None
+    return stamp if isinstance(stamp, str) else None
+
+
+_RESTAMP_ALT_FIX = (
+    "Or intentionally regenerate every board against your installed ESPHome\n"
+    "and re-stamp boards.index.json:\n"
+    "    python script/sync_boards.py --restamp"
+)
 
 
 def _require_matching_esphome() -> None:
     """Abort unless installed ESPHome matches the ``esphome_version`` boards.index.json was built with."""
-    try:
-        expected = orjson.loads(_INDEX_FILE.read_bytes())["esphome_version"]
-    except (OSError, orjson.JSONDecodeError, KeyError):
+    expected = _committed_esphome_stamp()
+    if expected is None:
         raise SystemExit(
             f"sync_boards: could not read esphome_version from {_INDEX_FILE}.\n"
-            f"To fix, regenerate the whole catalog first: python script/sync_boards.py"
-        ) from None
+            f"To fix, regenerate the whole catalog first: python script/sync_boards.py --restamp"
+        )
     assert_installed_esphome(
         expected,
         what="sync_boards single-board mode",
         normalize=_canonical_esphome_version,
-        alt_fix=(
-            "Or regenerate the whole catalog against your installed ESPHome instead:\n"
-            "    python script/sync_boards.py"
-        ),
+        alt_fix=_RESTAMP_ALT_FIX,
+    )
+
+
+def _require_matching_esphome_full() -> None:
+    """Abort a full sync on an ESPHome mismatch unless no stamp is readable (nothing to guard)."""
+    expected = _committed_esphome_stamp()
+    if expected is None:
+        _LOGGER.info(
+            "no readable esphome_version stamp in %s (missing or corrupt index) — "
+            "nothing to guard against, regenerating from the installed ESPHome",
+            _INDEX_FILE,
+        )
+        return
+    assert_installed_esphome(
+        expected,
+        what="sync_boards full sync",
+        normalize=_canonical_esphome_version,
+        alt_fix=_RESTAMP_ALT_FIX,
     )
 
 
@@ -1376,9 +1486,7 @@ def _emit_featured_components_index(boards: list[BoardCatalogEntry]) -> None:
             continue
         payload[board.id] = [fc.to_dict() for fc in board.featured_components]
     next_path = _FEATURED_INDEX_FILE.with_suffix(".json.next")
-    next_path.write_bytes(
-        orjson.dumps(payload, option=orjson.OPT_SORT_KEYS | orjson.OPT_APPEND_NEWLINE)
-    )
+    next_path.write_bytes(dumps_map_entry_per_line(payload))
     next_path.replace(_FEATURED_INDEX_FILE)
 
 

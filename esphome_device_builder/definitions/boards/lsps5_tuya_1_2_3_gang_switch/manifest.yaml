@@ -14,10 +14,10 @@ images:
 pins:
 - gpio: 8
   available: false
-  occupied_by: $devicename Switch 1
+  occupied_by: 1gang-switch Switch 1
 - gpio: 26
   available: false
-  occupied_by: $devicename Button 1
+  occupied_by: 1gang-switch Button 1
 docs_url: https://devices.esphome.io/devices/LSPS5-Tuya-1-2-3-Gang-Switch/
 featured_components:
 - id: binary_sensor_gpio_1
@@ -30,13 +30,13 @@ featured_components:
         inverted: true
       locked: true
     id: binary_sensor_gpio_1
-    name: $devicename Button 1
+    name: 1gang-switch Button 1
 - id: sensor_uptime_1
   component_id: sensor.uptime
   fields:
     update_interval: 60s
     id: sensor_uptime_1
-    name: $friendlyname Uptime
+    name: 1gang-switch Uptime
 - id: relay_1
   component_id: switch.gpio
   fields:
@@ -44,10 +44,10 @@ featured_components:
       value: 8
       locked: true
     id: relay_1
-    name: $devicename Switch 1
+    name: 1gang-switch Switch 1
 source:
   type: esphome-devices
   remote_id: LSPS5-Tuya-1-2-3-Gang-Switch
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/LSPS5-Tuya-1-2-3-Gang-Switch/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: ab45ab9fa63a29c67da18e86329061891ea3d0bc5780fc055d5c8f24ac753a98

@@ -13,16 +13,16 @@ images:
 pins:
 - gpio: 4
   available: false
-  occupied_by: WiFi Config Button
+  occupied_by: My PC WiFi Config Button
 - gpio: 5
   available: false
   occupied_by: out_relay
 - gpio: 10
   available: false
-  occupied_by: Case Button
+  occupied_by: My PC Case Button
 - gpio: 12
   available: false
-  occupied_by: Power Status
+  occupied_by: My PC Power Status
 docs_url: https://devices.esphome.io/devices/Sinilink-XY-WPCE/
 featured_components:
 - id: binary_sensor_gpio_1
@@ -35,7 +35,7 @@ featured_components:
         inverted: true
       locked: true
     id: binary_sensor_gpio_1
-    name: WiFi Config Button
+    name: My PC WiFi Config Button
 - id: inp_power_status
   component_id: binary_sensor.gpio
   fields:
@@ -46,7 +46,7 @@ featured_components:
         inverted: true
       locked: true
     id: inp_power_status
-    name: Power Status
+    name: My PC Power Status
 - id: binary_sensor_gpio_3
   component_id: binary_sensor.gpio
   fields:
@@ -57,7 +57,7 @@ featured_components:
         inverted: true
       locked: true
     id: binary_sensor_gpio_3
-    name: Case Button
+    name: My PC Case Button
 - id: out_relay
   component_id: output.gpio
   fields:
@@ -69,5 +69,5 @@ source:
   type: esphome-devices
   remote_id: Sinilink-XY-WPCE
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Sinilink-XY-WPCE/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: abb0dd5d77996a1cbf113c934b899605c183626abd5c9920b1774ce0dc9a6569

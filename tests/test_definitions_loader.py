@@ -42,9 +42,20 @@ _DEFS_MOD = "esphome_device_builder.definitions"
 
 
 def test_resolve_full_config_derives_from_source_and_honours_override() -> None:
-    """``full_config`` defaults to a devices.esphome.io import, overridable either way."""
-    # Default: derived from source.type.
+    """``full_config`` defaults to "is an import", overridable either way."""
+    # Default: derived from source.type — every known import source qualifies.
     assert _resolve_full_config({"source": {"type": "esphome-devices"}}) is True
+    assert _resolve_full_config({"source": {"type": "bluetooth-proxies"}}) is True
+    # A remote-package board never derives True — its completeness lives upstream.
+    assert (
+        _resolve_full_config(
+            {
+                "source": {"type": "bluetooth-proxies"},
+                "package_import_url": "github://x/y.yaml@main",
+            }
+        )
+        is False
+    )
     assert _resolve_full_config({}) is False
     assert _resolve_full_config({"source": {"type": "other"}}) is False
     # Manifest override wins in both directions.
@@ -126,6 +137,32 @@ def test_parse_connectivity_logs_and_skips_unknown(
         "bogus-wireless" in rec.getMessage() and "my-board" in rec.getMessage()
         for rec in caplog.records
     )
+
+
+def test_resolve_images_drops_escaping_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Absolute / parent-dir image entries drop with a warning instead of raising."""
+    boards_dir = tmp_path / "boards"
+    board_dir = boards_dir / "my-board"
+    (board_dir / "images").mkdir(parents=True)
+    (board_dir / "images" / "top.png").write_bytes(b"x")
+    # A real file above the boards dir: resolving it used to raise
+    # ValueError out of ``_local_to_url``'s ``relative_to``.
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"x")
+    monkeypatch.setattr(defs, "_BOARDS_DIR", boards_dir)
+
+    with caplog.at_level(logging.WARNING):
+        images = defs._resolve_images(
+            board_dir, ["images/top.png", "../../outside.png", str(outside)]
+        )
+
+    assert images == ["/boards/images/my-board/images/top.png"]
+    dropped = [
+        rec for rec in caplog.records if "must be a path inside the board dir" in rec.getMessage()
+    ]
+    assert len(dropped) == 2
 
 
 def _write_fake_boards(root: Path) -> Path:

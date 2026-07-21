@@ -39,7 +39,7 @@ featured_components:
     cold_white: output_cold
     warm_white: output_warm
     id: light_rgbww
-    name: light_rgbww
+    name: JDONG X4040
 - id: output_red
   component_id: output.libretiny_pwm
   fields:
@@ -80,10 +80,10 @@ featured_components:
   fields:
     type: seconds
     id: sensor_uptime_1
-    name: Uptime Sensor
+    name: JDONG X4040 Uptime Sensor
 featured_bundles:
 - id: light_rgbww_setup
-  name: light_rgbww (full setup)
+  name: JDONG X4040 (full setup)
   component_ids:
   - output_red
   - output_green
@@ -95,5 +95,5 @@ source:
   type: esphome-devices
   remote_id: JDONG-X6060-lamp
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/JDONG-X6060-lamp/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 9f5e28aeff370f957cd5e299e8cda6e625097080d18540c26695be75a947a6ff

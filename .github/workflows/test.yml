@@ -35,36 +35,26 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
 
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
-        with:
-          python-version: "3.13"
-
-      - name: Set up uv
-        # uv replaces pip for the install step (an order of
-        # magnitude faster on cold boots, with its own wheel cache).
-        # ``actions/setup-python`` provides the interpreter — its
-        # Python isn't marked externally-managed, so ``uv pip
-        # install --system`` works on macos / windows runners that
-        # would otherwise refuse a brew-shipped Python under PEP 668.
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
-        with:
-          enable-cache: true
-
-      - name: Install package + dev tools
+      - name: Set up Python 3.14 + cached venv
+        id: python
         # ``[esphome]`` is needed so the catalog smoke test below
         # can construct a ``ComponentCatalog`` against the same
-        # esphome version the dashboard ships with. ``--system``
-        # installs into the runner's Python instead of a venv —
-        # matches the existing pip-based CI shape so subsequent
-        # ``pre-commit`` / ``python script/...`` steps keep working
-        # without a ``uv run`` prefix. ``-c esphome-constraints.txt``
+        # esphome version the dashboard ships with.
+        # ``-c esphome-constraints.txt``
         # pins esphome to the version the committed catalog was generated
         # against; the ``sync-boards`` pre-commit hook below re-stamps
         # boards.index.json from the installed esphome, so an unpinned
         # "latest" would red this job on every esphome release until the
         # catalog is re-synced. The sync workflows bump that pin.
-        run: uv pip install --system -c esphome-constraints.txt -e '.[esphome,test]'
+        uses: ./.github/actions/restore-or-build-venv
+        with:
+          python-version: "3.14"
+          install-args: -c esphome-constraints.txt -e .[esphome,test]
+
+      - name: Put the venv on PATH
+        # Subsequent ``pre-commit`` / ``python script/...`` steps then
+        # work without a ``uv run`` prefix.
+        run: echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Cache pre-commit hook envs
         # Keyed on the python version + ``.pre-commit-config.yaml``
@@ -76,7 +66,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/pre-commit
-          key: pre-commit|${{ env.pythonLocation }}|${{ hashFiles('.pre-commit-config.yaml') }}
+          key: pre-commit|py${{ steps.python.outputs.python-version }}|${{ hashFiles('.pre-commit-config.yaml') }}
 
       - name: Run pre-commit (ruff lint + format, codespell, yaml/json checks)
         # On a cache hit the per-hook envs (ruff, codespell, …) are
@@ -107,7 +97,22 @@ jobs:
           if [ -n "$(git status --porcelain -- $paths)" ]; then
             git status --porcelain -- $paths
             git diff -- $paths
-            echo "::error::Board catalog is out of sync with manifests; run script/sync_boards.py and commit."
+            # || true everywhere: this branch runs under bash -e, and a
+            # no-match grep must not eat the ::error guidance below.
+            pin=$(grep -oE 'esphome==[A-Za-z0-9.]+' esphome-constraints.txt | head -n1 || true)
+            if [ -n "$pin" ]; then
+              install="uv pip install '$pin'"
+            else
+              install="uv pip install -c esphome-constraints.txt esphome"
+            fi
+            ids=$(git status --porcelain -- esphome_device_builder/definitions/board_bodies/ \
+              | grep 'board_bodies/' | sed -E 's|.*board_bodies/(.+)\.json.*|\1|' | sort -u || true)
+            if [ "$(echo "$ids" | grep -c .)" = "1" ]; then
+              fix="python script/update_board.py $ids"
+            else
+              fix="python script/sync_boards.py"
+            fi
+            echo "::error::Board catalog is out of sync with manifests. Fix locally: $install && $fix — then commit the regenerated files (see definitions/README.md)."
             exit 1
           fi
 
@@ -165,27 +170,27 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
 
-      - name: Set up uv and Python ${{ matrix.python-version }}
+      - name: Set up Python ${{ matrix.python-version }} + cached venv
         # Astral-managed Python (PGO + LTO + BOLT + mimalloc, plus
         # the PEP 744 tail-call interpreter on 3.14+) shortens the
         # suite end-to-end. The benchmarks job below stays on stock
         # CPython so CodSpeed's callgrind instruction counts remain
-        # comparable against the historical baseline.
-        uses: ./.github/actions/setup-uv-python
+        # comparable against the historical baseline. The venv is
+        # uv-discovered; pytest runs via ``uv run``, cross-platform
+        # without per-shell activate scripts.
+        uses: ./.github/actions/restore-or-build-venv
         with:
           python-version: ${{ matrix.python-version }}
-
-      - name: Create venv + install package + test deps
-        # Managed Python isn't a system interpreter; install into a
-        # uv-discovered ``.venv`` and invoke pytest via ``uv run``.
-        # Cross-platform: ``uv venv`` works the same on POSIX +
-        # Windows runners and avoids per-shell activate scripts.
-        run: |
-          uv venv
-          uv pip install -e '.[esphome,test]'
+          install-args: -c esphome-constraints.txt -e .[esphome,test]
 
       - name: Run pytest
-        # ``uv run`` resolves the .venv created above. Single-line —
+        # ``uv run --no-sync`` uses the .venv created above as-is.
+        # Without ``--no-sync``, ``uv run`` re-locks the project
+        # universally (every Python / platform ``requires-python``
+        # admits), so a transitive-pin conflict on an environment we
+        # never test — esphome 2026.7.0's esptool/cryptography clash
+        # on Intel macOS — fails the job even though the venv it
+        # actually runs in installed cleanly. Single-line —
         # Windows runners default to PowerShell, which doesn't accept
         # bash-style ``\`` line continuation. ``-n auto`` runs the
         # suite under pytest-xdist with one worker per logical CPU;
@@ -206,7 +211,7 @@ jobs:
         #   at ~1-2 minutes; without the cap a single hung worker
         #   burns the runner's full 6h budget.
         timeout-minutes: 5
-        run: uv run pytest -q -n auto --maxfail=5 --durations=10 --timeout=120 --ignore=tests/benchmarks --ignore=tests/real_compile --ignore=tests/e2e --cov=esphome_device_builder --cov-report=xml --cov-report=term
+        run: uv run --no-sync pytest -q -n auto --maxfail=5 --durations=10 --timeout=120 --ignore=tests/benchmarks --ignore=tests/real_compile --ignore=tests/e2e --cov=esphome_device_builder --cov-report=xml --cov-report=term
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f  # v7.0.0
@@ -258,15 +263,14 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
 
-      - name: Set up uv and Python ${{ matrix.python-version }}
-        uses: ./.github/actions/setup-uv-python
+      - name: Set up Python ${{ matrix.python-version }} + cached venv
+        # The channel install below mutates the venv after the
+        # composite has already saved it, so the beta/dev esphome
+        # never lands in the shared base-key cache.
+        uses: ./.github/actions/restore-or-build-venv
         with:
           python-version: ${{ matrix.python-version }}
-
-      - name: Create venv + install package + test deps
-        run: |
-          uv venv
-          uv pip install -e '.[esphome,test]'
+          install-args: -c esphome-constraints.txt -e .[esphome,test]
 
       - name: Install esphome (${{ matrix.channel }} channel)
         run: ${{ matrix.install }}
@@ -277,7 +281,9 @@ jobs:
         run: uv pip show esphome | grep -E '^(Name|Version):'
 
       - name: Run pytest
-        # ``uv run`` resolves the .venv created above. ``-n auto``
+        # ``uv run --no-sync`` uses the .venv created above as-is
+        # (no universal re-lock; see the OS-axis job). It also can't
+        # touch the channel-specific esphome installed above. ``-n auto``
         # runs under pytest-xdist for the same speedup the OS-axis
         # matrix gets. No ``--cov`` here — the merged coverage report
         # comes from the OS-axis ``test`` job; this run is purely a
@@ -287,7 +293,7 @@ jobs:
         # upstream beta/dev are exactly the case this protects
         # against.
         timeout-minutes: 5
-        run: uv run pytest -q -n auto --maxfail=5 --durations=10 --timeout=120 --ignore=tests/benchmarks --ignore=tests/real_compile --ignore=tests/e2e
+        run: uv run --no-sync pytest -q -n auto --maxfail=5 --durations=10 --timeout=120 --ignore=tests/benchmarks --ignore=tests/real_compile --ignore=tests/e2e
 
   e2e:
     name: E2E (esphome ${{ matrix.channel }})
@@ -318,15 +324,11 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
 
-      - name: Set up uv and Python 3.14
-        uses: ./.github/actions/setup-uv-python
+      - name: Set up Python 3.14 + cached venv
+        uses: ./.github/actions/restore-or-build-venv
         with:
           python-version: "3.14"
-
-      - name: Create venv + install package + test deps
-        run: |
-          uv venv
-          uv pip install -e '.[esphome,test]'
+          install-args: -c esphome-constraints.txt -e .[esphome,test]
 
       - name: Install esphome (${{ matrix.channel }} channel)
         if: matrix.install != ''
@@ -341,8 +343,34 @@ jobs:
         # fast wire-level e2e suite. ``--timeout=120`` is plenty for it.
         timeout-minutes: 10
         run: >-
-          uv run pytest -q -n auto tests/e2e --maxfail=5 --durations=10 --timeout=120 --no-cov
+          uv run --no-sync pytest -q -n auto tests/e2e --maxfail=5 --durations=10 --timeout=120 --no-cov
           --ignore=tests/e2e/slow
+
+  e2e-mqtt:
+    name: E2E MQTT discovery (mosquitto)
+    runs-on: ubuntu-latest
+    # The MQTT discovery e2e (tests/e2e/slow/mqtt/) drives real paho
+    # clients against a real mosquitto broker; the test self-skips
+    # wherever the broker isn't installed, so this is the one job that
+    # installs it. Linux only — the broker path is platform-independent.
+    steps:
+      - name: Check out code from GitHub
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Set up Python 3.14 + cached venv
+        uses: ./.github/actions/restore-or-build-venv
+        with:
+          python-version: "3.14"
+          install-args: -c esphome-constraints.txt -e .[esphome,test]
+
+      - name: Install mosquitto
+        run: sudo apt-get update && sudo apt-get install -y mosquitto
+
+      - name: Run MQTT discovery e2e
+        timeout-minutes: 5
+        run: uv run --no-sync pytest -q tests/e2e/slow/mqtt --durations=10 --timeout=120 --no-cov
 
   e2e-libretiny:
     name: E2E LibreTiny (esphome stable)
@@ -358,15 +386,11 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
 
-      - name: Set up uv and Python 3.14
-        uses: ./.github/actions/setup-uv-python
+      - name: Set up Python 3.14 + cached venv
+        uses: ./.github/actions/restore-or-build-venv
         with:
           python-version: "3.14"
-
-      - name: Create venv + install package + test deps
-        run: |
-          uv venv
-          uv pip install -e '.[esphome,test]'
+          install-args: -c esphome-constraints.txt -e .[esphome,test]
 
       - name: Show installed esphome version
         run: uv pip show esphome | grep -E '^(Name|Version):'
@@ -385,7 +409,7 @@ jobs:
         # 20 min outer cap: a cold LibreTiny SDK clone plus compile runs
         # minutes. The test's own ``@pytest.mark.timeout(600)`` caps it.
         timeout-minutes: 20
-        run: uv run pytest -q tests/e2e/slow/libretiny --durations=10 --timeout=600 --no-cov
+        run: uv run --no-sync pytest -q tests/e2e/slow/libretiny --durations=10 --timeout=600 --no-cov
 
   e2e-native-idf:
     name: E2E native ESP-IDF (esphome dev)
@@ -402,15 +426,11 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
 
-      - name: Set up uv and Python 3.14
-        uses: ./.github/actions/setup-uv-python
+      - name: Set up Python 3.14 + cached venv
+        uses: ./.github/actions/restore-or-build-venv
         with:
           python-version: "3.14"
-
-      - name: Create venv + install package + test deps
-        run: |
-          uv venv
-          uv pip install -e '.[esphome,test]'
+          install-args: -c esphome-constraints.txt -e .[esphome,test]
 
       - name: Install esphome (dev channel)
         run: uv pip install --upgrade git+https://github.com/esphome/esphome.git@dev
@@ -433,6 +453,27 @@ jobs:
           restore-keys: |
             e2e-espidf-${{ runner.os }}-
 
+      - name: Cache ccache objects
+        # Same rolling shape as the toolchain cache above: restored from
+        # the newest prior entry on every run, saved fresh each run, so
+        # repeat compiles hit across runs. Small (~0.1-0.3 GB) next to
+        # the toolchain entry.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/esphome-ccache
+          key: e2e-espidf-ccache-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            e2e-espidf-ccache-${{ runner.os }}-
+
+      - name: Install ccache
+        # esphome's native-IDF build enables ccache whenever the binary is
+        # on PATH (``espidf/framework.py``'s ``_ccache_env``) and respects
+        # a pre-set CCACHE_DIR, so the run step below points it at the
+        # dedicated cached dir instead of the default inside the prefix.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ccache
+
       - name: Run native ESP-IDF e2e
         # A cold native-IDF compile installs the IDF toolchain then runs
         # ninja; the test's own ``@pytest.mark.timeout(900)`` caps it.
@@ -441,7 +482,14 @@ jobs:
         timeout-minutes: 25
         env:
           ESPHOME_ESP_IDF_PREFIX: ~/.cache/esphome-idf
-        run: uv run pytest -q tests/e2e/slow/esp32 --durations=10 --timeout=900 --no-cov
+        # CCACHE_DIR is set in the shell, not step env: ccache does not
+        # expanduser a ``~`` (only ESPHOME_ESP_IDF_PREFIX gets that
+        # treatment, from esphome itself).
+        run: CCACHE_DIR="$HOME/.cache/esphome-ccache" uv run --no-sync pytest -q tests/e2e/slow/esp32 --durations=10 --timeout=900 --no-cov
+
+      - name: Print ccache statistics
+        if: always()
+        run: CCACHE_DIR="$HOME/.cache/esphome-ccache" ccache -s
 
   e2e-boards:
     name: E2E board create validation (esphome stable)
@@ -456,15 +504,11 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
 
-      - name: Set up uv and Python 3.14
-        uses: ./.github/actions/setup-uv-python
+      - name: Set up Python 3.14 + cached venv
+        uses: ./.github/actions/restore-or-build-venv
         with:
           python-version: "3.14"
-
-      - name: Create venv + install package + test deps
-        run: |
-          uv venv
-          uv pip install -e '.[esphome,test]'
+          install-args: -c esphome-constraints.txt -e .[esphome,test]
 
       - name: Show installed esphome version
         run: uv pip show esphome | grep -E '^(Name|Version):'
@@ -474,7 +518,7 @@ jobs:
         # multi-threaded xdist worker risks a deadlock. The test's own pool
         # provides the parallelism; its ``@pytest.mark.timeout`` caps it.
         timeout-minutes: 10
-        run: uv run pytest -q tests/e2e/slow/boards --durations=10 --timeout=600 --no-cov
+        run: uv run --no-sync pytest -q tests/e2e/slow/boards --durations=10 --timeout=600 --no-cov
 
   benchmarks:
     name: Run benchmarks (CodSpeed)
@@ -490,13 +534,17 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        # Stock CPython, held at 3.13: a version bump resets every
+        # CodSpeed baseline at once, so it moves deliberately and alone.
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.13"
 
       - name: Set up uv
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
         with:
+          # Keep in sync with setup-uv-python's uv-version default.
+          version: "0.11.29"
           enable-cache: true
 
       - name: Install package + test deps

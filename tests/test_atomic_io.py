@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 import sys
@@ -9,7 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from esphome_device_builder.helpers.atomic_io import atomic_write, read_bytes_with_retry
+from esphome_device_builder.helpers.atomic_io import (
+    atomic_write,
+    atomic_write_exclusive,
+    atomic_write_preserving_mode,
+    read_bytes_with_retry,
+)
 
 
 def test_atomic_write_cleans_up_tempfile_on_error(
@@ -46,6 +52,27 @@ def test_atomic_write_applies_mode(tmp_path: Path) -> None:
     atomic_write(target, b"payload", mode=0o600)
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert target.read_bytes() == b"payload"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows doesn't honor POSIX mode bits")
+@pytest.mark.parametrize("mode", [pytest.param(0o600, id="0600"), pytest.param(0o640, id="0640")])
+def test_atomic_write_preserving_mode_keeps_existing_mode(tmp_path: Path, mode: int) -> None:
+    """A rewrite keeps the target's current permission bits."""
+    target = tmp_path / "secrets.yaml"
+    target.write_text("a: 1\n")
+    target.chmod(mode)
+    atomic_write_preserving_mode(target, b"b: 2\n")
+    assert target.read_bytes() == b"b: 2\n"
+    assert stat.S_IMODE(target.stat().st_mode) == mode
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows doesn't honor POSIX mode bits")
+def test_atomic_write_preserving_mode_new_file_gets_default(tmp_path: Path) -> None:
+    """A missing target is created with ``default_mode``."""
+    target = tmp_path / "secrets.yaml"
+    atomic_write_preserving_mode(target, b"a: 1\n")
+    assert target.read_bytes() == b"a: 1\n"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
 
 
 def test_atomic_write_overwrites_existing(tmp_path: Path) -> None:
@@ -236,3 +263,155 @@ def test_read_bytes_with_retry_does_not_retry_on_posix(
         read_bytes_with_retry(tmp_path / "demo.bin")
 
     assert calls["n"] == 1  # no retry on POSIX
+
+
+def test_atomic_write_exclusive_creates_fresh_file(tmp_path: Path) -> None:
+    """A fresh target gets the full payload, 0o644, and no staging litter."""
+    target = tmp_path / "kitchen.yaml"
+
+    atomic_write_exclusive(target, b"esphome:\n")
+
+    assert target.read_bytes() == b"esphome:\n"
+    if sys.platform != "win32":
+        assert stat.S_IMODE(target.stat().st_mode) == 0o644
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_atomic_write_exclusive_refuses_existing_target(tmp_path: Path) -> None:
+    """An existing target raises FileExistsError, keeps its bytes, leaves no litter."""
+    target = tmp_path / "kitchen.yaml"
+    target.write_bytes(b"original")
+
+    with pytest.raises(FileExistsError):
+        atomic_write_exclusive(target, b"clobber")
+
+    assert target.read_bytes() == b"original"
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_atomic_write_exclusive_failed_publish_leaves_no_partial_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A publish failure surfaces, and neither a partial target nor staging litter remains."""
+    target = tmp_path / "kitchen.yaml"
+
+    def _fail(src: object, dst: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("esphome_device_builder.helpers.atomic_io.os.link", _fail)
+    monkeypatch.setattr("esphome_device_builder.helpers.atomic_io.os.rename", _fail)
+
+    with pytest.raises(OSError, match="No space left"):
+        atomic_write_exclusive(target, b"esphome:\n")
+
+    assert not target.exists()
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_atomic_write_exclusive_concurrent_creator_loses_cleanly(tmp_path: Path) -> None:
+    """A target appearing after staging (the TOCTOU window) still raises FileExistsError."""
+    target = tmp_path / "kitchen.yaml"
+    real_link = os.link
+    real_rename = os.rename
+
+    def _racing_link(src: object, dst: object, **kwargs: object) -> None:
+        target.write_bytes(b"raced")
+        real_link(src, dst, **kwargs)  # type: ignore[arg-type]
+
+    def _racing_rename(src: object, dst: object, **kwargs: object) -> None:
+        target.write_bytes(b"raced")
+        real_rename(src, dst, **kwargs)  # type: ignore[arg-type]
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("esphome_device_builder.helpers.atomic_io.os.link", _racing_link)
+        mp.setattr("esphome_device_builder.helpers.atomic_io.os.rename", _racing_rename)
+        with pytest.raises(FileExistsError):
+            atomic_write_exclusive(target, b"clobber")
+
+    assert target.read_bytes() == b"raced"
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_atomic_write_exclusive_retries_windows_scanner_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient Windows ``PermissionError`` on the exclusive publish is retried."""
+    monkeypatch.setattr("esphome_device_builder.helpers.atomic_io._IS_WINDOWS", True)
+    monkeypatch.setattr("esphome_device_builder.helpers.atomic_io.time.sleep", lambda _s: None)
+    target = tmp_path / "kitchen.yaml"
+
+    real_rename = os.rename
+    calls = {"n": 0}
+
+    def _flaky(src: object, dst: object, **kwargs: object) -> None:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise PermissionError(5, "Access is denied")
+        real_rename(src, dst, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("os.rename", _flaky)
+    atomic_write_exclusive(target, b"esphome:\n")
+
+    assert calls["n"] == 3  # failed twice, succeeded on the third
+    assert target.read_bytes() == b"esphome:\n"
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+def test_atomic_write_exclusive_windows_existing_target_fails_fast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``FileExistsError`` on the Windows publish surfaces immediately, no retry."""
+    monkeypatch.setattr("esphome_device_builder.helpers.atomic_io._IS_WINDOWS", True)
+    target = tmp_path / "kitchen.yaml"
+    target.write_bytes(b"original")
+
+    calls = {"n": 0}
+
+    def _refuse(src: object, dst: object, **kwargs: object) -> None:
+        calls["n"] += 1
+        raise FileExistsError(str(dst))
+
+    monkeypatch.setattr("os.rename", _refuse)
+    with pytest.raises(FileExistsError):
+        atomic_write_exclusive(target, b"clobber")
+
+    assert calls["n"] == 1  # no retry on an existing destination
+    assert target.read_bytes() == b"original"
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX hardlink fallback")
+def test_atomic_write_exclusive_falls_back_on_hardlink_less_filesystem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A link-unsupported errno degrades to the exclusive-open write."""
+    target = tmp_path / "kitchen.yaml"
+
+    def _no_links(src: object, dst: object, **kwargs: object) -> None:
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr("esphome_device_builder.helpers.atomic_io.os.link", _no_links)
+    atomic_write_exclusive(target, b"esphome:\n")
+
+    assert target.read_bytes() == b"esphome:\n"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX hardlink fallback")
+def test_atomic_write_exclusive_fallback_still_refuses_existing_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback keeps exclusivity: an existing target raises FileExistsError."""
+    target = tmp_path / "kitchen.yaml"
+    target.write_bytes(b"original")
+
+    def _no_links(src: object, dst: object, **kwargs: object) -> None:
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr("esphome_device_builder.helpers.atomic_io.os.link", _no_links)
+    with pytest.raises(FileExistsError):
+        atomic_write_exclusive(target, b"clobber")
+
+    assert target.read_bytes() == b"original"
+    assert list(tmp_path.glob("*.tmp")) == []

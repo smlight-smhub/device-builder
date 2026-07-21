@@ -21,7 +21,7 @@ pins:
   occupied_by: relayoutput
 - gpio: 26
   available: false
-  occupied_by: Switch S1-S2
+  occupied_by: relayname Switch S1-S2
 docs_url: https://devices.esphome.io/devices/Aubess-WiFi-Smart-Switch/
 featured_components:
 - id: button_back
@@ -33,6 +33,10 @@ featured_components:
         inverted: true
         mode: INPUT_PULLUP
       locked: true
+    filters:
+      value:
+      - delayed_on_off: 50ms
+      locked: true
     id: button_back
     name: button_back
 - id: binary_sensor_gpio_2
@@ -41,8 +45,12 @@ featured_components:
     pin:
       value: 26
       locked: true
+    filters:
+      value:
+      - delayed_on_off: 50ms
+      locked: true
     id: binary_sensor_gpio_2
-    name: Switch S1-S2
+    name: relayname Switch S1-S2
 - id: led
   component_id: light.status_led
   fields:
@@ -63,13 +71,14 @@ featured_components:
 - id: relay
   component_id: switch.output
   fields:
+    icon: mdi:power
     restore_mode: ALWAYS_OFF
     output: relayoutput
     id: relay
-    name: Relay
+    name: relayname Relay
 featured_bundles:
 - id: relay_setup
-  name: Relay (full setup)
+  name: relayname Relay (full setup)
   component_ids:
   - relayoutput
   - relay
@@ -77,5 +86,5 @@ source:
   type: esphome-devices
   remote_id: Aubess-WiFi-Smart-Switch
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Aubess-WiFi-Smart-Switch/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 3a77d5dc6e3a2add815606648b571e6502518c8588152ece6177e7fcad72f212

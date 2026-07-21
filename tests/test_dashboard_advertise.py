@@ -24,15 +24,15 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from esphome_device_builder import device_builder as db_module
-from esphome_device_builder.controllers._device_state_monitor import DeviceStateMonitor
+from esphome_device_builder.controllers._device_state_monitor.mdns import MdnsSource
 from esphome_device_builder.device_builder import DeviceBuilder
 from esphome_device_builder.helpers import dashboard_advertise
 from esphome_device_builder.helpers.dashboard_advertise import (
     SERVICE_TYPE,
     DashboardAdvertiser,
-    _default_friendly_name,
     _local_addresses,
     build_mdns_hostname,
+    default_friendly_name,
 )
 
 
@@ -42,6 +42,7 @@ def _make_advertiser(
     hostname: str | None = None,
     port: int = 6052,
     pin_sha256: str | None = None,
+    on_ha_addon: bool = False,
 ) -> DashboardAdvertiser:
     return DashboardAdvertiser(
         port=port,
@@ -50,6 +51,7 @@ def _make_advertiser(
         pin_sha256=pin_sha256,
         name=name,
         hostname=hostname,
+        on_ha_addon=on_ha_addon,
     )
 
 
@@ -61,13 +63,30 @@ def _make_advertiser(
 def test_default_friendly_name_strips_dotted_suffix(monkeypatch: pytest.MonkeyPatch) -> None:
     """Mac-style ``desktop.local`` from gethostname yields ``desktop``."""
     monkeypatch.setattr(socket, "gethostname", lambda: "desktop.local")
-    assert _default_friendly_name() == "desktop"
+    assert default_friendly_name() == "desktop"
 
 
 def test_default_friendly_name_falls_back_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     """Empty/whitespace hostname falls back to a stable string."""
     monkeypatch.setattr(socket, "gethostname", lambda: "")
-    assert _default_friendly_name() == "esphome-dashboard"
+    assert default_friendly_name() == "esphome-dashboard"
+
+
+def test_advertiser_exposes_display_identity_properties() -> None:
+    """``friendly_name`` / ``on_ha_addon`` read back the constructor values."""
+    advertiser = _make_advertiser(name="Nicks-Mac-Studio", on_ha_addon=True)
+    assert advertiser.friendly_name == "Nicks-Mac-Studio"
+    assert advertiser.on_ha_addon is True
+
+
+def test_advertiser_friendly_name_defaults_from_hostname(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No ``name`` arg → the hostname-derived default label."""
+    monkeypatch.setattr(socket, "gethostname", lambda: "desktop.local")
+    advertiser = _make_advertiser()
+    assert advertiser.friendly_name == "desktop"
+    assert advertiser.on_ha_addon is False
 
 
 def test_build_mdns_hostname_uses_fixed_prefix_and_dashboard_id() -> None:
@@ -409,6 +428,23 @@ def test_build_service_info_omits_remote_build_port_when_unset() -> None:
     assert "remote_build_port" not in decoded
 
 
+def test_build_service_info_carries_ha_addon_when_on_addon() -> None:
+    """The add-on tags its broadcast; peers label it from the container hostname."""
+    advertiser = _make_advertiser(name="5c53de3b-esphome", hostname="green.local", on_ha_addon=True)
+    info = advertiser.build_service_info()
+    decoded = {k.decode(): v.decode() for k, v in info.properties.items()}
+    assert decoded["ha_addon"] == "1"
+    assert decoded["friendly_name"] == "5c53de3b-esphome"
+
+
+def test_build_service_info_omits_ha_addon_off_addon() -> None:
+    """``ha_addon`` is absent for a normal (non-add-on) dashboard."""
+    advertiser = _make_advertiser(name="green", hostname="green.local")
+    info = advertiser.build_service_info()
+    decoded = {k.decode(): v.decode() for k, v in info.properties.items()}
+    assert "ha_addon" not in decoded
+
+
 def test_set_remote_build_port_updates_subsequent_advertise() -> None:
     """``set_remote_build_port`` makes the next advertise carry the new port."""
     advertiser = _make_advertiser()
@@ -518,6 +554,23 @@ async def test_service_instance_name_returns_published_name_after_register(
     assert advertiser.service_instance_name is None
 
 
+async def test_hostname_and_addresses_accessors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``hostname`` is static; ``addresses`` mirror the published ServiceInfo."""
+    monkeypatch.setattr(dashboard_advertise, "_local_addresses", lambda: ["192.168.1.10"])
+    advertiser = _make_advertiser(name="green", hostname="green.local")
+    assert advertiser.hostname == "green.local"
+    assert advertiser.addresses == []
+    zc = _make_zeroconf_mock()
+    await advertiser.register(zc)
+    try:
+        assert advertiser.addresses == ["192.168.1.10"]
+    finally:
+        await advertiser.unregister()
+    assert advertiser.addresses == []
+
+
 def test_service_target_endpoint_returns_none_before_register() -> None:
     """``service_target_endpoint`` is ``None`` until ``register()`` succeeds."""
     advertiser = _make_advertiser(name="green", hostname="green.local")
@@ -587,7 +640,7 @@ def test_build_service_info_valid_target_without_dashboard_id(
     The fixed-prefix fallback ``esphome-builder.local`` keeps the
     advertise from emitting a bare ``.`` that python-zeroconf would
     reject. ``friendly_name`` independently rescues to
-    ``esphome-dashboard`` from ``_default_friendly_name``.
+    ``esphome-dashboard`` from ``default_friendly_name``.
     """
     monkeypatch.setattr(socket, "gethostname", lambda: "")
     advertiser = DashboardAdvertiser(port=6052, server_version="1.0", esphome_version="2026.5.0")
@@ -999,10 +1052,12 @@ async def test_device_builder_advertises_in_ha_addon_mode(
             self.set_pin_sha256 = MagicMock()
             self.set_remote_build_port = MagicMock()
             self.refresh = AsyncMock()
+            self.hostname = "esphome-builder-test.local"
+            self.addresses = []
             instances.append(self)
 
     monkeypatch.setattr(db_module, "DashboardAdvertiser", _FakeAdvertiser)
-    monkeypatch.setattr(DeviceStateMonitor, "zeroconf", property(lambda self: fake_zc))
+    monkeypatch.setattr(MdnsSource, "zeroconf", property(lambda self: fake_zc))
 
     settings = make_settings(with_core_path=True)
     settings.on_ha_addon = True
@@ -1048,10 +1103,12 @@ async def test_device_builder_constructs_advertiser_when_zeroconf_present(
             self.set_pin_sha256 = MagicMock()
             self.set_remote_build_port = MagicMock()
             self.refresh = AsyncMock()
+            self.hostname = "esphome-builder-test.local"
+            self.addresses = []
             instances.append(self)
 
     monkeypatch.setattr(db_module, "DashboardAdvertiser", _FakeAdvertiser)
-    monkeypatch.setattr(DeviceStateMonitor, "zeroconf", property(lambda self: fake_zc))
+    monkeypatch.setattr(MdnsSource, "zeroconf", property(lambda self: fake_zc))
 
     settings = make_settings(with_core_path=True)
     settings.on_ha_addon = False

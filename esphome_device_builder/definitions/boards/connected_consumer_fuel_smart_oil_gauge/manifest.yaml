@@ -28,9 +28,6 @@ pins:
 - gpio: 12
   available: false
   occupied_by: Control Button
-- gpio: 13
-  available: false
-  occupied_by: Sleep 1hr
 - gpio: 14
   available: false
   occupied_by: Ultrasonic Pwr
@@ -63,6 +60,9 @@ featured_components:
 - id: adc_input
   component_id: sensor.adc
   fields:
+    pin:
+      value: A0
+      locked: true
     accuracy_decimals: 5
     update_interval: 5s
     entity_category: diagnostic
@@ -83,16 +83,6 @@ featured_components:
     update_interval: never
     id: oil_distance
     name: Distance to Oil
-- id: done
-  component_id: switch.gpio
-  fields:
-    pin:
-      value: 13
-      locked: true
-    entity_category: config
-    disabled_by_default: true
-    id: done
-    name: Done
 - id: tempsens_en
   component_id: switch.gpio
   fields:
@@ -113,19 +103,9 @@ featured_components:
     disabled_by_default: false
     id: ultrasonic_pwr
     name: Ultrasonic Pwr
-- id: sleep_1hr
-  component_id: switch.gpio
-  fields:
-    pin:
-      value: 13
-      locked: true
-    entity_category: config
-    disabled_by_default: true
-    id: sleep_1hr
-    name: Sleep 1hr
 source:
   type: esphome-devices
   remote_id: Connected-Consumer-Fuel-Smart-Oil-Gauge
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Connected-Consumer-Fuel-Smart-Oil-Gauge/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: ae7339c7490ada5d43e6f2ff03973325fb566bd7a4961e7d7371f9c253738f6a

@@ -18,7 +18,7 @@ pins:
   occupied_by: button_1
 - gpio: 12
   available: false
-  occupied_by: Switch
+  occupied_by: Athom Smart Plug Switch
 - gpio: 13
   available: false
   occupied_by: sw_led1
@@ -33,25 +33,18 @@ featured_components:
       locked: true
     id: button_1
     name: button_1
-- id: sensor_total_daily_energy_1
-  component_id: sensor.total_daily_energy
-  fields:
-    unit_of_measurement: kWh
-    icon: mdi:clock-alert
-    id: sensor_total_daily_energy_1
-    name: Total Daily Energy
 - id: sensor_uptime_1
   component_id: sensor.uptime
   fields:
     icon: mdi:clock-outline
     id: sensor_uptime_1
-    name: Uptime
+    name: Athom Smart Plug Uptime
 - id: sensor_wifi_signal_1
   component_id: sensor.wifi_signal
   fields:
     update_interval: 60s
     id: sensor_wifi_signal_1
-    name: Wifi Signal
+    name: Athom Smart Plug Wifi Signal
 - id: relay_1
   component_id: switch.gpio
   fields:
@@ -60,7 +53,7 @@ featured_components:
       locked: true
     icon: mdi:power-socket-fr
     id: relay_1
-    name: Switch
+    name: Athom Smart Plug Switch
 - id: sw_led1
   component_id: switch.gpio
   fields:
@@ -73,5 +66,5 @@ source:
   type: esphome-devices
   remote_id: Athom-Smart-Plug-PG01V2-EU16A
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Athom-Smart-Plug-PG01V2-EU16A/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: e3b378aa43e9835fd86315ae0d6a912ba5c395536b7ffb7da2fef36253e0ddcf

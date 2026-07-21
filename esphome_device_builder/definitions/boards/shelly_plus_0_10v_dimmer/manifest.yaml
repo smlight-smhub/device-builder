@@ -17,13 +17,13 @@ tags:
 pins:
 - gpio: 4
   available: false
-  occupied_by: Switch 1
+  occupied_by: shelly-0-10 Switch 1
 - gpio: 18
   available: false
-  occupied_by: Switch 2
+  occupied_by: shelly-0-10 Switch 2
 - gpio: 25
   available: false
-  occupied_by: Button
+  occupied_by: shelly-0-10 Button
 - gpio: 26
   available: false
   occupied_by: led_output
@@ -38,16 +38,24 @@ featured_components:
     pin:
       value: 4
       locked: true
+    filters:
+      value:
+      - delayed_on_off: 50ms
+      locked: true
     id: binary_sensor_gpio_1
-    name: Switch 1
+    name: shelly-0-10 Switch 1
 - id: binary_sensor_gpio_2
   component_id: binary_sensor.gpio
   fields:
     pin:
       value: 18
       locked: true
+    filters:
+      value:
+      - delayed_on_off: 50ms
+      locked: true
     id: binary_sensor_gpio_2
-    name: Switch 2
+    name: shelly-0-10 Switch 2
 - id: binary_sensor_gpio_3
   component_id: binary_sensor.gpio
   fields:
@@ -59,8 +67,12 @@ featured_components:
           input: true
           pullup: true
       locked: true
+    filters:
+      value:
+      - delayed_on_off: 5ms
+      locked: true
     id: binary_sensor_gpio_3
-    name: Button
+    name: shelly-0-10 Button
 - id: dimmer_out
   component_id: light.monochromatic
   fields:
@@ -68,7 +80,7 @@ featured_components:
     restore_mode: ALWAYS_ON
     output: led_output
     id: dimmer_out
-    name: Light
+    name: shelly-0-10 Light
 - id: led_output
   component_id: output.ledc
   fields:
@@ -83,15 +95,6 @@ featured_components:
     min_power: 0.6
     zero_means_zero: true
     id: led_output
-- id: sensor_ntc_1
-  component_id: sensor.ntc
-  fields:
-    unit_of_measurement: °C
-    accuracy_decimals: 1
-    icon: mdi:thermometer
-    sensor: temp_resistance_reading
-    id: sensor_ntc_1
-    name: Temperature
 - id: temp_resistance_reading
   component_id: sensor.resistance
   fields:
@@ -111,15 +114,10 @@ featured_components:
     name: temp_analog_reading
 featured_bundles:
 - id: dimmer_out_setup
-  name: Light (full setup)
+  name: shelly-0-10 Light (full setup)
   component_ids:
   - led_output
   - dimmer_out
-- id: sensor_ntc_1_setup
-  name: Temperature (full setup)
-  component_ids:
-  - temp_resistance_reading
-  - sensor_ntc_1
 - id: temp_resistance_reading_setup
   name: temp_resistance_reading (full setup)
   component_ids:
@@ -129,5 +127,5 @@ source:
   type: esphome-devices
   remote_id: Shelly-Plus-0-10V-Dimmer
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Shelly-Plus-0-10V-Dimmer/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 356a87b31d4b59e3c4e41899ad037d3100d6830d35dbad5dc7c05e68613aff8e

@@ -30,16 +30,25 @@ real upstream shapes.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import esphome.config_validation as cv
 import pytest
 import voluptuous as vol
 
 from script.sync_components import (  # type: ignore[import-not-found]
+    _MACHINE_DERIVED_RANGE_FIELDS,
     _apply_field_ranges,
     _collect_field_ranges,
     _numeric_range_bounds,
     _platform_field_keys,
+    _walk_entries,
     introspect_component,
+)
+
+_BODIES_DIR = (
+    Path(__file__).resolve().parent.parent / "esphome_device_builder" / "definitions" / "components"
 )
 
 
@@ -355,3 +364,18 @@ def test_no_platform_component_has_no_range_bleed() -> None:
     """A component with no platform manifests can't bleed (guards #426)."""
     pytest.importorskip("esphome.components.bluetooth_proxy")
     assert introspect_component("bluetooth_proxy")["field_range_bleed_keys"] == {}
+
+
+def test_compile_process_limit_range_is_dropped_as_machine_derived() -> None:
+    """The sync machine's CPU count must not become the field's max."""
+    pytest.importorskip("esphome.core.config")
+    field_ranges = introspect_component("esphome")["field_ranges"]
+    assert ("compile_process_limit",) not in field_ranges
+
+
+def test_committed_catalog_ships_machine_derived_fields_unbounded() -> None:
+    """No committed body carries a bound the sync runner's hardware chose."""
+    for component_id, path in _MACHINE_DERIVED_RANGE_FIELDS:
+        body = json.loads((_BODIES_DIR / f"{component_id}.json").read_text(encoding="utf-8"))
+        entries_by_path = dict(_walk_entries(body["config_entries"]))
+        assert entries_by_path[path].get("range") is None, (component_id, path)

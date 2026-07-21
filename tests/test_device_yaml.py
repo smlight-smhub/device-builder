@@ -10,7 +10,7 @@ import logging
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, ClassVar
+from typing import Any
 from unittest import mock
 
 import pytest
@@ -31,6 +31,7 @@ from esphome_device_builder.helpers.device_yaml import (
     compute_has_pending_changes,
     configuration_stem,
     extract_esphome_meta_from_config,
+    generate_adoption_yaml,
     generate_device_yaml,
     generate_minimal_stub_yaml,
     load_device_from_storage,
@@ -40,6 +41,7 @@ from esphome_device_builder.helpers.device_yaml import (
 )
 from esphome_device_builder.helpers.device_yaml._parsing import (
     _is_valid_esphome_name,
+    device_ap_label,
     extract_logger_baud_rate,
     extract_ota_partition_access,
 )
@@ -353,6 +355,28 @@ esphome:
     assert parse_esphome_meta(yaml_content, extra_substitutions=None) == parse_esphome_meta(
         yaml_content
     )
+
+
+@pytest.mark.parametrize(
+    ("yaml_content", "expected"),
+    [
+        pytest.param(
+            "esphome:\n  name: kitchen\n  friendly_name: Kitchen Lamp\n",
+            "Kitchen Lamp",
+            id="friendly_wins",
+        ),
+        pytest.param("esphome:\n  name: kitchen\n", "kitchen", id="name_fallback"),
+        pytest.param(
+            "substitutions:\n  room: Bedroom\nesphome:\n  name: kitchen\n"
+            "  friendly_name: ${room}\n",
+            "Bedroom",
+            id="substitution_resolves",
+        ),
+        pytest.param("wifi:\n  ssid: x\n", None, id="no_identity"),
+    ],
+)
+def test_device_ap_label(yaml_content: str, expected: str | None) -> None:
+    assert device_ap_label(parse_esphome_meta(yaml_content)) == expected
 
 
 # ----------------------------------------------------------------------
@@ -980,6 +1004,19 @@ def test_load_device_from_storage_resolves_config_once_for_packages(tmp_path: Pa
         device = load_device_from_storage(yaml_file)
     assert device.target_platform == "esp32"
     assert spy.call_count == 1
+
+
+def test_load_device_from_storage_detects_deep_sleep(tmp_path: Path) -> None:
+    """A top-level ``deep_sleep:`` block sets ``uses_deep_sleep``; its absence clears it."""
+    sleeper = tmp_path / "sleeper.yaml"
+    sleeper.write_text(
+        "esphome:\n  name: sleeper\ndeep_sleep:\n  sleep_duration: 60s\n", encoding="utf-8"
+    )
+    assert load_device_from_storage(sleeper).uses_deep_sleep is True
+
+    awake = tmp_path / "awake.yaml"
+    awake.write_text("esphome:\n  name: awake\napi:\n", encoding="utf-8")
+    assert load_device_from_storage(awake).uses_deep_sleep is False
 
 
 @pytest.mark.parametrize(
@@ -2512,49 +2549,6 @@ def test_load_device_falls_back_to_yaml_when_core_platform_missing(tmp_path: Pat
     assert device.target_platform == "esp32"
 
 
-@pytest.mark.usefixtures("_redirect_ext_storage")
-def test_load_device_handles_storage_without_core_platform_attr(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``StorageJSON`` from older esphome (< 2025.6) lacks ``core_platform`` entirely.
-
-    pyproject's floor is ``esphome>=2024.1.0`` so the attribute
-    can be missing on the loaded object — not just ``None``.
-    Direct attribute access would raise ``AttributeError`` and
-    blow up the device scan. ``getattr`` with a default keeps
-    the loader compatible while we wait for the dep floor to
-    move past 2025.6.
-    """
-    yaml_path = tmp_path / "kitchen.yaml"
-    yaml_path.write_text(
-        "esphome:\n  name: kitchen\nesp32:\n  board: esp32-c3-devkitm-1\n",
-        encoding="utf-8",
-    )
-
-    class _LegacyStorage:
-        # Pre-#9028 ``StorageJSON`` shape — no ``core_platform``
-        # attribute at all. Carries the upstream-canonical chip
-        # variant uppercase as ``target_platform``.
-        name = "kitchen"
-        friendly_name = None
-        comment = None
-        address = ""
-        web_port = None
-        target_platform = "ESP32C3"
-        firmware_bin_path = None
-        esphome_version = ""
-        loaded_integrations: ClassVar[list[str]] = []
-
-    monkeypatch.setattr(
-        "esphome_device_builder.helpers.device_yaml.StorageJSON.load",
-        staticmethod(lambda _p: _LegacyStorage()),
-    )
-
-    device = load_device_from_storage(yaml_path)
-
-    assert device.target_platform == "esp32"
-
-
 # ---------------------------------------------------------------------------
 # load_device_from_storage — labels threading
 # ---------------------------------------------------------------------------
@@ -2659,6 +2653,7 @@ def test_load_device_without_previous_defaults_active_source_to_unknown(
     device = load_device_from_storage(yaml_path)
 
     assert device.runtime_state.active_source is ReachabilitySource.UNKNOWN
+    assert device.runtime_state.deployed_identity_live is False
 
 
 @pytest.mark.usefixtures("_redirect_ext_storage")
@@ -2677,6 +2672,7 @@ def test_load_device_carries_runtime_state_from_previous(tmp_path: Path) -> None
         deployed_config_hash="deadbeef",
         queued_update=True,
         api_encryption_active="Noise_NNpsk0_25519_ChaChaPoly_SHA256",
+        deployed_identity_live=True,
     )
 
     reloaded = load_device_from_storage(yaml_path, previous=previous)
@@ -2773,6 +2769,118 @@ def test_every_board_body_generates_creatable_platform_block() -> None:
         elif not block.get("board"):
             offenders.append(f"{entry.id}: {platform} block missing board")
     assert not offenders, "boards generate invalid create YAML:\n" + "\n".join(offenders)
+
+
+@pytest.mark.xdist_group("catalog")
+async def test_nested_list_field_presets_render_as_yaml_lists(
+    session_component_catalog: Any,
+) -> None:
+    """Nested-list field presets survive default resolution into parseable YAML.
+
+    ``seeed-xiao-w5500-zwave-proxy`` is the first board presetting
+    list-of-mapping fields (``usb_host.devices``, ``usb_uart.channels``,
+    ``mdns.services``); pins that the generation path renders them intact.
+    """
+    board = await session_component_catalog._db.boards.get_board(
+        board_id="seeed-xiao-w5500-zwave-proxy"
+    )
+    assert board is not None
+    defaults = await session_component_catalog.resolve_default_components(board)
+    out = generate_device_yaml("zw", "Zw", board, ssid="", psk="", defaults=defaults)
+    config = yaml.safe_load(out)
+    assert config["usb_host"]["devices"] == [{"id": "device_0", "vid": "0x303A", "pid": "0x4001"}]
+    assert config["usb_uart"]["channels"] == [
+        {"id": "uch_1", "baud_rate": 115200, "buffer_size": 4096}
+    ]
+    assert config["zwave_proxy"] == {"id": "zw_proxy", "uart_id": "uch_1"}
+    assert config["mdns"]["services"] == [
+        {"service": "_zwave", "protocol": "_tcp", "port": 6053, "txt": {"protocol": "esphome"}}
+    ]
+    assert "{'" not in out
+    assert config["ethernet"]["type"] == "W5500"
+    assert config["esp32"]["flash_size"] == "16MB"
+    assert "wifi" not in config
+
+
+def _make_package_board(*, ethernet: bool) -> BoardCatalogEntry:
+    """Minimal remote-package board; *ethernet* claims the wired network via connectivity."""
+    board = _make_esp32_board()
+    board.package_import_url = (
+        "github://esphome/bluetooth-proxies/olimex/olimex-esp32-poe-iso.yaml@main"
+    )
+    board.package_name = "esphome.bluetooth-proxy"
+    if ethernet:
+        board.hardware.connectivity = [Connectivity.ETHERNET]
+    return board
+
+
+@pytest.mark.parametrize(
+    ("network", "friendly"),
+    [
+        pytest.param("wifi", "Proxy 1", id="wifi"),
+        pytest.param("ethernet", "Proxy 1", id="ethernet"),
+        pytest.param("wifi", None, id="no_friendly"),
+    ],
+)
+def test_generate_adoption_yaml_matches_dashboard_import(
+    tmp_path: Path, network: str, friendly: str | None
+) -> None:
+    """The shared adoption shape stays in lockstep with esphome's ``import_config``.
+
+    ``dashboard_import.import_config`` documents device-builder as a consumer
+    of its generated shape; both ``devices/import`` and package-board creates
+    emit through :func:`generate_adoption_yaml`, pinned here structurally
+    (API keys are random, so normalised before comparing).
+    """
+    from esphome.components.dashboard_import import import_config  # noqa: PLC0415
+
+    from script._board_import import safe_load_yaml  # noqa: PLC0415
+
+    url = "github://esphome/bluetooth-proxies/olimex/olimex-esp32-poe-iso.yaml@main"
+    ours = safe_load_yaml(
+        generate_adoption_yaml(
+            "proxy-1",
+            friendly,
+            "esphome.bluetooth-proxy",
+            url,
+            network_provided=network != "wifi",
+        )
+    )
+    reference_path = tmp_path / "proxy-1.yaml"
+    import_config(
+        str(reference_path),
+        "proxy-1",
+        friendly,
+        "esphome.bluetooth-proxy",
+        url,
+        network=network,
+        encryption=True,
+    )
+    theirs = safe_load_yaml(reference_path.read_text(encoding="utf-8"))
+    assert ours["api"]["encryption"]["key"]
+    assert theirs["api"]["encryption"]["key"]
+    ours["api"]["encryption"]["key"] = theirs["api"]["encryption"]["key"] = "<key>"
+    assert ours == theirs
+
+
+def test_generate_adoption_yaml_variants() -> None:
+    """Inline credentials quote through; missing secrets and api opt-out drop blocks."""
+    inline = generate_adoption_yaml(
+        "p", "P", "k", "github://x/y.yaml@main", ssid="Net #1", psk="pw"
+    )
+    assert 'ssid: "Net #1"' in inline
+    no_creds = generate_adoption_yaml(
+        "p", "P", "k", "github://x/y.yaml@main", wifi_secrets_available=False
+    )
+    assert "wifi" not in no_creds
+    no_api = generate_adoption_yaml("p", "P", "k", "github://x/y.yaml@main", api_encryption=False)
+    assert "api:" not in no_api
+
+
+def test_board_provides_network_for_package_boards() -> None:
+    """A package board's ethernet claim rides on ``hardware.connectivity``."""
+    assert board_provides_network(_make_package_board(ethernet=True)) is True
+    assert board_provides_network(_make_package_board(ethernet=False)) is False
 
 
 # ---------------------------------------------------------------------------
@@ -3084,6 +3192,7 @@ def _board(
     return SimpleNamespace(
         featured_components=[SimpleNamespace(component_id=c) for c in (featured or [])],
         default_components=[SimpleNamespace(id=c) for c in (default or [])],
+        package_import_url="",
         hardware=SimpleNamespace(
             connectivity=[SimpleNamespace(value=c) for c in (connectivity or [])]
         ),
@@ -3153,4 +3262,5 @@ def test_device_to_dict_emits_runtime_state_when_all_default() -> None:
         "deployed_config_hash": "",
         "queued_update": False,
         "api_encryption_active": None,
+        "deployed_identity_live": False,
     }

@@ -58,14 +58,23 @@ featured_components:
     cf1_pin:
       value: 4
       locked: true
+    current_resistor: '0.001215'
+    voltage_divider: '806'
     update_interval: 60s
     id: sensor_hlw8012_1
 - id: analog_button
   component_id: sensor.adc
   fields:
+    pin:
+      value: A0
+      locked: true
     raw: true
     update_interval: 100ms
     unit_of_measurement: ''
+    filters:
+      value:
+      - delta: 50
+      locked: true
     id: analog_button
     name: analog_button
 - id: relay_left_outlet
@@ -90,5 +99,5 @@ source:
   type: esphome-devices
   remote_id: SUPERNIGHT-Double-Outlet-Plug
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/SUPERNIGHT-Double-Outlet-Plug/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 65c1d6cb40fa850d6d6a5e05e2401209c4e7db045a44b4060e01043e9cebd187

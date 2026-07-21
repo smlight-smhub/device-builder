@@ -15,7 +15,10 @@ from esphome_device_builder.models.common import ConfigValueOption
 from script.sync_components import (  # type: ignore[import-not-found]
     _apply_psram_options,
     _build_options,
+    _enum_default,
+    _load_unit_of_measurement_options,
     _psram_static_fields,
+    _split_default_marker,
     _variant_enum_map,
 )
 
@@ -57,6 +60,106 @@ def test_build_options_keeps_docs_label_without_variants() -> None:
     assert options == [{"label": "Nice X", "value": "x"}]
 
 
+def test_build_options_sentence_docs_become_description() -> None:
+    """Sentence prose lands in ``description``; the label stays the value."""
+    options = _build_options(
+        {"values": {"digest": {"docs": "Sends only hashes, keeping the password off the wire."}}}
+    )
+    assert options == [
+        {
+            "label": "digest",
+            "value": "digest",
+            "description": "Sends only hashes, keeping the password off the wire.",
+        }
+    ]
+
+
+def test_split_default_marker_strips_each_idiom() -> None:
+    assert _split_default_marker("Normal operation. *(default)*") == ("Normal operation.", True)
+    assert _split_default_marker("(Default) Attempt to restore.") == ("Attempt to restore.", True)
+    assert _split_default_marker("Default") == ("", True)
+    assert _split_default_marker("default") == ("", True)
+    assert _split_default_marker("(Default)") == ("", True)
+    assert _split_default_marker("Left channel data.") == ("Left channel data.", False)
+    assert _split_default_marker("") == ("", False)
+
+
+def test_build_options_never_ships_marker_text() -> None:
+    """Marker-bearing docs lose the marker; marker-only docs leave the value as label."""
+    options = _build_options(
+        {
+            "values": {
+                "NORMAL": {"docs": "Normal operation, sends ACK signals. *(default)*"},
+                "SHORT": {"docs": "Short label *(default)*"},
+                "BARE": {"docs": "Default"},
+            }
+        }
+    )
+    assert options == [
+        {
+            "label": "NORMAL",
+            "value": "NORMAL",
+            "description": "Normal operation, sends ACK signals.",
+        },
+        {"label": "SHORT", "value": "SHORT", "description": "Short label"},
+        {"label": "BARE", "value": "BARE"},
+    ]
+
+
+def test_build_options_one_sentence_sibling_demotes_the_whole_enum() -> None:
+    """A menu never mixes value labels with docs labels."""
+    options = _build_options(
+        {
+            "values": {
+                "RESULT": {"docs": "The resulting value (sum of P, I, and D terms)."},
+                "ERROR": {"docs": "The calculated error (setpoint - process_variable)"},
+                "BARE": None,
+            }
+        }
+    )
+    assert options == [
+        {
+            "label": "RESULT",
+            "value": "RESULT",
+            "description": "The resulting value (sum of P, I, and D terms).",
+        },
+        {
+            "label": "ERROR",
+            "value": "ERROR",
+            "description": "The calculated error (setpoint - process_variable)",
+        },
+        {"label": "BARE", "value": "BARE"},
+    ]
+
+
+def test_build_options_overlong_docs_become_description() -> None:
+    """Docs too long for a dropdown row are demoted even without terminal punctuation."""
+    truncated = "The temperature of the air being discharged by the BedJet will be"
+    options = _build_options({"values": {"outlet": {"docs": truncated}}})
+    assert options == [{"label": "outlet", "value": "outlet", "description": truncated}]
+
+
+def test_build_options_flattens_markdown_in_descriptions() -> None:
+    options = _build_options(
+        {"values": {"HEAT": {"docs": "The heating power supplied to the `heat_output`."}}}
+    )
+    assert options == [
+        {
+            "label": "HEAT",
+            "value": "HEAT",
+            "description": "The heating power supplied to the heat_output.",
+        }
+    ]
+
+
+def test_enum_default_reads_flag_and_docs_markers() -> None:
+    """Per-value ``default: true`` and the docs marker both mark; else None."""
+    assert _enum_default({"values": {"basic": {"default": True}, "digest": None}}) == "basic"
+    assert _enum_default({"values": {"a": None, "b": {"docs": "Default"}}}) == "b"
+    assert _enum_default({"values": {"a": None, "b": None}}) is None
+    assert _enum_default({"values": "not-a-dict"}) is None
+
+
 def test_apply_psram_options_prefers_bundle_schema() -> None:
     """When the bundle already produced psram entries (new format), keep them."""
     bundle = [{"key": "mode", "type": "string", "options": [{"label": "octal", "value": "octal"}]}]
@@ -82,6 +185,14 @@ def test_config_value_option_omits_empty_variants() -> None:
     tagged = ConfigValueOption(label="octal", value="octal", variants=["esp32s3"])
     assert tagged.to_dict() == {"label": "octal", "value": "octal", "variants": ["esp32s3"]}
     assert ConfigValueOption.from_dict(tagged.to_dict()) == tagged
+
+
+def test_config_value_option_omits_none_description() -> None:
+    """``description`` is stripped when unset and round-trips when set."""
+    assert "description" not in ConfigValueOption(label="a", value="a").to_dict()
+    described = ConfigValueOption(label="a", value="a", description="Prose.")
+    assert described.to_dict() == {"label": "a", "value": "a", "description": "Prose."}
+    assert ConfigValueOption.from_dict(described.to_dict()) == described
 
 
 def test_variant_enum_map_reads_schema_extract() -> None:
@@ -115,3 +226,10 @@ def test_psram_static_fields_extracts_new_static_schema() -> None:
 def test_psram_static_fields_empty_for_old_callable_schema() -> None:
     """An old-style callable CONFIG_SCHEMA isn't statically extractable — fall back."""
     assert _psram_static_fields(lambda _config: None) == {}
+
+
+def test_unit_of_measurement_options_exclude_empty_unit() -> None:
+    """UNIT_EMPTY never ships as an option; every label/value is non-empty."""
+    options = _load_unit_of_measurement_options()
+    assert options
+    assert all(o["value"] and o["label"] for o in options)

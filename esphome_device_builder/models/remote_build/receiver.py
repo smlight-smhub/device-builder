@@ -37,6 +37,17 @@ class StoredPeer(DashboardModel):
     label: str
     paired_at: float
     peer_ip: str = ""
+    # Offloader-advertised human machine label (its mDNS
+    # ``friendly_name``). Captured at pair time and refreshed on
+    # session-open only when the offloader sends a non-empty value.
+    friendly_name: str = ""
+    # Offloader-advertised HA add-on flag; refreshed on session-open.
+    ha_addon: bool = False
+    # True when the offloader's pair dialog label was left at its
+    # auto-derived prefill — the UI's signal that ``friendly_name``
+    # may replace ``label``. Old offloaders never send it (False),
+    # so a possibly-custom label always wins.
+    label_auto: bool = False
 
     def refresh_from_pair_request(
         self,
@@ -46,6 +57,9 @@ class StoredPeer(DashboardModel):
         label: str,
         paired_at: float,
         peer_ip: str,
+        friendly_name: str,
+        ha_addon: bool,
+        label_auto: bool,
     ) -> None:
         """
         Update the fields a fresh ``intent="pair_request"`` supplies.
@@ -63,6 +77,9 @@ class StoredPeer(DashboardModel):
         self.label = label
         self.paired_at = paired_at
         self.peer_ip = peer_ip
+        self.friendly_name = friendly_name
+        self.ha_addon = ha_addon
+        self.label_auto = label_auto
 
 
 @dataclass
@@ -88,6 +105,12 @@ class PeerSummary(DashboardModel):
     status: PeerStatus
     peer_ip: str = ""
     connected: bool = False
+    # Offloader's human machine label / HA add-on flag from the
+    # handshake; ``label_auto`` marks the label as an untouched
+    # auto-derived prefill the UI may replace with ``friendly_name``.
+    friendly_name: str = ""
+    ha_addon: bool = False
+    label_auto: bool = False
 
 
 # 24h default cold-window for the 6c cleanup sweep. 1h floor
@@ -222,6 +245,11 @@ class IdentityView(DashboardModel):
     rebuild fail-softed" (port now bound by something else,
     cert load throws). The latter is silent in the logs
     without this flag.
+
+    ``listener_host`` / ``listener_addresses`` / ``listener_port``
+    are the mDNS-advertised pairing address: host ``None`` without
+    an attached advertiser, addresses ``[]`` until it registers,
+    port ``None`` while the listener is unbound.
     """
 
     dashboard_id: str
@@ -229,3 +257,6 @@ class IdentityView(DashboardModel):
     server_version: str
     esphome_version: str
     listener_bound: bool = False
+    listener_host: str | None = None
+    listener_addresses: list[str] = field(default_factory=list)
+    listener_port: int | None = None

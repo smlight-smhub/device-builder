@@ -5,8 +5,8 @@ Owns the dashboard's *outbound* role: discovering peer
 receivers via mDNS, persisting the per-pin
 :class:`StoredPairing` table, driving the pair-request →
 pair-status long-poll lifecycle, and keeping one
-:class:`PeerLinkClient` per APPROVED pairing alive for
-``submit_job`` / ``cancel_job`` / ``download_artifacts`` to
+:class:`PeerLinkClient` per APPROVED pairing alive for the
+transparent-install dispatch and ``download_artifacts`` to
 reach through.
 
 Pairs with :class:`~.receiver.ReceiverController` — the two
@@ -20,7 +20,6 @@ reference passed to both at construction.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from esphome import const as _esphome_const
@@ -33,9 +32,10 @@ from ...helpers.build_scheduler import BuildSchedulerInputs
 from ...helpers.dashboard_identity import get_or_create_identities
 from ...helpers.event_bus import Event
 from ...helpers.peer_link_resolver import make_peer_link_resolver
-from ...helpers.storage import Store
+from ...helpers.storage import Store, drain_shutdown_callbacks
 from ...models import (
     EventType,
+    FirmwareJob,
     OffloaderAlertSnapshotEntry,
     OffloaderJobStateChangedData,
     OffloaderPairAlertDismissedData,
@@ -90,8 +90,8 @@ _LOGGER = logging.getLogger(__name__)
 _PAIRINGS_SAVE_DELAY_SECONDS = 1.0
 
 
-class OffloaderController(_RemoteBuildBase):  # noqa: PLR0904
-    """Outbound side of remote-build: pair, peer-link, submit/cancel/download."""
+class OffloaderController(_RemoteBuildBase):
+    """Outbound side of remote-build: pair, peer-link, artifact download."""
 
     def __init__(self, device_builder: DeviceBuilder) -> None:
         super().__init__(device_builder)
@@ -155,8 +155,7 @@ class OffloaderController(_RemoteBuildBase):  # noqa: PLR0904
         # on its heartbeat to time out.
         await drain_tasks(h.task for h in state.peer_link_clients.values())
         state.peer_link_clients.clear()
-        for callback in self._shutdown_callbacks:
-            await callback()
+        await drain_shutdown_callbacks(self._shutdown_callbacks)
         state.pairings.clear()
         state.peer_queue_status.clear()
         state.offloader_remote_jobs.clear()
@@ -414,6 +413,8 @@ class OffloaderController(_RemoteBuildBase):  # noqa: PLR0904
         receiver_label: str,
         offloader_label: str,
         pairing_key: str | None = None,
+        offloader_label_auto: bool = False,
+        receiver_label_auto: bool | None = None,
         **kwargs: Any,
     ) -> PairingSummary:
         """Open a Noise XX WS, send ``intent="pair_request"``, persist a local row."""
@@ -425,6 +426,8 @@ class OffloaderController(_RemoteBuildBase):  # noqa: PLR0904
             receiver_label=receiver_label,
             offloader_label=offloader_label,
             pairing_key=pairing_key,
+            offloader_label_auto=offloader_label_auto,
+            receiver_label_auto=receiver_label_auto,
         )
 
     @api_command("remote_build/unpair")
@@ -451,31 +454,9 @@ class OffloaderController(_RemoteBuildBase):  # noqa: PLR0904
             self, pin_sha256=pin_sha256, hostname=hostname, port=port
         )
 
-    async def _validate_submit_job_config(self, configuration: object) -> tuple[str, Path]:
-        """Validate the WS *configuration* arg, return ``(name, yaml_path)``."""
-        return await submit_job_commands.validate_submit_job_config(self, configuration)
-
     def _lookup_open_peer_link_client(self, pin_sha256: str, *, label: str) -> PeerLinkClient:
         """Return the live :class:`PeerLinkClient` for *pin_sha256*, raising on miss."""
         return peer_link_lifecycle.lookup_open_peer_link_client(self, pin_sha256, label=label)
-
-    async def _build_submit_job_bundle(self, configuration: str, yaml_path: Path) -> bytes:
-        """Build the bundle bytes for *yaml_path*."""
-        return await submit_job_commands.build_submit_job_bundle(self, configuration, yaml_path)
-
-    @api_command("remote_build/submit_job")
-    async def submit_job(
-        self,
-        *,
-        pin_sha256: str,
-        configuration: str,
-        target: str,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        """Bundle *configuration* and dispatch a build to the receiver behind *pin_sha256*."""
-        return await submit_job_commands.submit_job(
-            self, pin_sha256=pin_sha256, configuration=configuration, target=target
-        )
 
     @api_command("remote_build/download_artifacts")
     async def download_artifacts(
@@ -490,16 +471,15 @@ class OffloaderController(_RemoteBuildBase):  # noqa: PLR0904
             self, pin_sha256=pin_sha256, job_id=job_id
         )
 
-    @api_command("remote_build/cancel_job")
-    async def cancel_job(
+    @api_command("remote_build/reset_peer_build_env")
+    async def reset_peer_build_env(
         self,
         *,
         pin_sha256: str,
-        job_id: str,
         **kwargs: Any,
-    ) -> dict[str, bool]:
-        """Send a ``cancel_job`` frame to the receiver behind *pin_sha256*."""
-        return await submit_job_commands.cancel_job(self, pin_sha256=pin_sha256, job_id=job_id)
+    ) -> FirmwareJob:
+        """Enqueue a mirror job resetting the whole build env on *pin_sha256*'s receiver."""
+        return await submit_job_commands.reset_peer_build_env(self, pin_sha256=pin_sha256)
 
     def get_pairing(self, pin_sha256: str) -> StoredPairing | None:
         """Return the :class:`StoredPairing` for *pin_sha256*, or ``None``."""

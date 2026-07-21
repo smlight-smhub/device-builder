@@ -16,6 +16,15 @@ featured_components:
   component_id: sensor.adc
   fields:
     update_interval: 1s
+    pin:
+      value: VCC
+      locked: true
+    filters:
+      value:
+      - calibrate_linear:
+        - 2.8 -> 0.0
+        - 3.6 -> 100
+      locked: true
     unit_of_measurement: '%'
     accuracy_decimals: 0
     id: sensor_adc_1
@@ -24,5 +33,5 @@ source:
   type: esphome-devices
   remote_id: Mirabella-Door-Window-Sensor
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Mirabella-Door-Window-Sensor/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: b771c92a25d45718c78cf9106df6d3a49e67ff153257fc947152aa1dee3f83e9

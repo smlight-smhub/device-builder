@@ -3,16 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 import pytest
 
 from esphome_device_builder.controllers._device_state_monitor import ping as ping_module
-from esphome_device_builder.controllers._device_state_monitor.controller import (
-    DeviceStateMonitor,
-)
 from esphome_device_builder.models import (
     Device,
     DeviceRuntimeState,
@@ -20,7 +15,7 @@ from esphome_device_builder.models import (
     ReachabilitySource,
 )
 
-from .conftest import make_state_monitor_with_callbacks
+from .conftest import make_state_monitor_with_callbacks, running_task, wait_until
 
 
 def _ping_only_device(name: str = "garage", state: DeviceState = DeviceState.UNKNOWN) -> Device:
@@ -63,8 +58,8 @@ def _install_sweep_probe(
 
 def _patch_loop_for_wake_tests(monkeypatch: pytest.MonkeyPatch) -> None:
     """Skip bootstrap and stretch the interval so only wakes can drive a second sweep."""
-    monkeypatch.setattr(ping_module, "_PING_BOOTSTRAP_DELAY", 0)
-    monkeypatch.setattr(ping_module, "_PING_INTERVAL", 3600)
+    monkeypatch.setattr(ping_module.PingSource, "_bootstrap_delay", 0)
+    monkeypatch.setattr(ping_module.PingSource, "_interval", 3600)
 
     async def _noop_resolve(_monitor: object) -> None:
         return None
@@ -72,33 +67,14 @@ def _patch_loop_for_wake_tests(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ping_module.shared, "resolve_non_api_mdns_targets", _noop_resolve)
 
 
-@asynccontextmanager
-async def _running_loop(monitor: DeviceStateMonitor) -> AsyncIterator[None]:
-    """Spawn ``monitor._ping.run()`` and cancel + drain on exit."""
-    task = asyncio.create_task(monitor._ping.run())
-    try:
-        yield
-    finally:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-
-
-async def _yield_until(predicate: Callable[[], bool], iterations: int = 50) -> None:
-    """Yield to the event loop until *predicate()* is truthy or *iterations* elapse."""
-    for _ in range(iterations):
-        if predicate():
-            return
-        await asyncio.sleep(0)
-
-
 def test_probe_device_ping_sets_wake_event() -> None:
     """One probe call flips the loop's wake event without scheduling a task."""
     monitor, _ = make_state_monitor_with_callbacks([_ping_only_device()])
-    assert monitor._ping._wake.is_set() is False
+    assert monitor.ping._wake.is_set() is False
 
     monitor.probe_device_ping("garage")
 
-    assert monitor._ping._wake.is_set() is True
+    assert monitor.ping._wake.is_set() is True
     assert monitor._tasks == set()
 
 
@@ -109,7 +85,7 @@ def test_probe_device_ping_skips_online_mdns_claimed_device() -> None:
 
     monitor.probe_device_ping("garage")
 
-    assert monitor._ping._wake.is_set() is False
+    assert monitor.ping._wake.is_set() is False
 
 
 def test_probe_device_ping_wakes_offline_mdns_sourced_device() -> None:
@@ -119,7 +95,7 @@ def test_probe_device_ping_wakes_offline_mdns_sourced_device() -> None:
 
     monitor.probe_device_ping("garage")
 
-    assert monitor._ping._wake.is_set() is True
+    assert monitor.ping._wake.is_set() is True
 
 
 def test_probe_device_ping_unknown_name_fails_open() -> None:
@@ -128,7 +104,7 @@ def test_probe_device_ping_unknown_name_fails_open() -> None:
 
     monitor.probe_device_ping("ghost")
 
-    assert monitor._ping._wake.is_set() is True
+    assert monitor.ping._wake.is_set() is True
 
 
 def test_probe_reachability_fires_both_probes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -136,7 +112,7 @@ def test_probe_reachability_fires_both_probes(monkeypatch: pytest.MonkeyPatch) -
     monitor, _ = make_state_monitor_with_callbacks([_ping_only_device()])
     probed: list[str] = []
     monkeypatch.setattr(
-        monitor._importable,
+        monitor.mdns,
         "probe_device",
         lambda name, service_name=None: probed.append(name),
     )
@@ -144,7 +120,7 @@ def test_probe_reachability_fires_both_probes(monkeypatch: pytest.MonkeyPatch) -
     monitor.probe_reachability("garage")
 
     assert probed == ["garage"]
-    assert monitor._ping._wake.is_set() is True
+    assert monitor.ping._wake.is_set() is True
 
 
 def test_probe_device_ping_herd_collapses_to_single_set() -> None:
@@ -155,23 +131,23 @@ def test_probe_device_ping_herd_collapses_to_single_set() -> None:
     for device in devices:
         monitor.probe_device_ping(device.name)
 
-    assert monitor._ping._wake.is_set() is True
+    assert monitor.ping._wake.is_set() is True
     assert monitor._tasks == set()
 
 
 async def test_wake_bails_idle_wait_early(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A wake fired during the idle wait re-runs the sweep without paying ``_PING_INTERVAL``."""
+    """A wake fired during the idle wait re-runs the sweep without paying the interval."""
     _patch_loop_for_wake_tests(monkeypatch)
     monitor, _ = make_state_monitor_with_callbacks([_ping_only_device()])
     sweeps = _install_sweep_probe(monkeypatch)
 
-    async with _running_loop(monitor):
-        await _yield_until(lambda: sweeps.count >= 1)
+    async with running_task(monitor.ping.run()):
+        await wait_until(lambda: sweeps.count >= 1, 1, "the first sweep")
         assert sweeps.count == 1
 
         monitor.probe_device_ping("garage")
 
-        await _yield_until(lambda: sweeps.count >= 2)
+        await wait_until(lambda: sweeps.count >= 2, 1, "the second sweep")
         assert sweeps.count == 2
 
 
@@ -181,10 +157,10 @@ async def test_wake_during_sweep_triggers_followup(monkeypatch: pytest.MonkeyPat
     monitor, _ = make_state_monitor_with_callbacks([_ping_only_device()])
     sweeps = _install_sweep_probe(monkeypatch, block_first=True)
 
-    async with _running_loop(monitor):
+    async with running_task(monitor.ping.run()):
         await asyncio.wait_for(sweeps.first_entered.wait(), timeout=1)
         monitor.probe_device_ping("garage")
         sweeps.release_first.set()
 
-        await _yield_until(lambda: sweeps.count >= 2)
+        await wait_until(lambda: sweeps.count >= 2, 1, "the follow-up sweep")
         assert sweeps.count == 2

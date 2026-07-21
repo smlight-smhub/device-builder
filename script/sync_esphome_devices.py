@@ -29,32 +29,65 @@ Usage
 from __future__ import annotations
 
 import argparse
-import hashlib
+import functools
+import importlib.util
 import logging
 import re
 import shutil
-import subprocess
 import sys
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
+
+# Up here so a missing esphome fails at startup, not mid-run on the
+# first page with a ``substitutions:`` block.
+from esphome.components.substitutions import do_substitution_pass  # noqa: E402
 
 from esphome_device_builder.constants import (  # noqa: E402
     BOARD_PIN_KEYS,
     BUS_CATEGORIES,
     DEVICE_IMPORT_SOURCE_TYPE,
+    FEATURED_EXCLUDED_CATEGORIES,
 )
-from esphome_device_builder.helpers.pin_gpio import parse_board_gpio  # noqa: E402
 from esphome_device_builder.models.boards import Esp32Variant  # noqa: E402
-from script._component_catalog import load_component_catalog  # noqa: E402
-from script._manifest import ManifestError, load_manifest_dict  # noqa: E402
+from script._board_import import (  # noqa: E402
+    ESP32_VARIANT_DEFAULT_BOARD,
+    build_esphome_block,
+    build_pins,
+    connectivity_for,
+    emit_manifest,
+    extract_ethernet,
+    get_repo_revision,
+    gpio_number,
+    hash_content,
+    is_placeholder_value,
+    load_components_index,
+    prune_removed,
+    read_manifest_dict,
+    safe_load_yaml,
+)
+from script._full_setup_gate import apply_validation_gate  # noqa: E402
 from script._repo_cache import ensure_shallow_git_repo  # noqa: E402
+
+# Hoisted to ``script/_board_import.py``; private aliases keep this module's
+# call sites and test imports stable.
+_ESP32_VARIANT_DEFAULT_BOARD = ESP32_VARIANT_DEFAULT_BOARD
+_build_esphome_block = build_esphome_block
+_build_pins = build_pins
+_connectivity_for = connectivity_for
+_extract_ethernet = extract_ethernet
+_get_repo_revision = get_repo_revision
+_gpio_number = gpio_number
+_hash_content = hash_content
+_is_placeholder_value = is_placeholder_value
+_load_components_index = load_components_index
+_read_manifest_dict = read_manifest_dict
+_safe_load_yaml = safe_load_yaml
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -64,8 +97,6 @@ _LOGGER = logging.getLogger("sync_esphome_devices")
 
 _DEFINITIONS_DIR = _REPO_ROOT / "esphome_device_builder" / "definitions"
 _BOARDS_DIR = _DEFINITIONS_DIR / "boards"
-_COMPONENTS_INDEX_JSON = _DEFINITIONS_DIR / "components.index.json"
-_COMPONENTS_BODIES_DIR = _DEFINITIONS_DIR / "components"
 _CACHE_ROOT = _REPO_ROOT / ".cache"
 _DEVICES_CLONE_DIR = _CACHE_ROOT / "esphome-devices"
 _DEVICES_REPO_URL = "https://github.com/esphome/devices.esphome.io.git"
@@ -78,25 +109,6 @@ _DEVICES_REPO_RAW_BASE = "https://raw.githubusercontent.com/esphome/devices.esph
 # Closed enums upstream enforces (mirror of
 # devices.esphome.io/src/utils/validFrontmatter.ts).
 _VALID_SOC_FAMILIES: frozenset[str] = frozenset({"esp32", "esp8266", "bk72xx", "rp2040", "rtl87xx"})
-
-# Map ESP32 chip variants to a sensible default PlatformIO board id —
-# used when an upstream page declares ``esp32: { variant: esp32c3 }``
-# without an explicit ``board:``. Picked to match what ESPHome itself
-# defaults to for each variant.
-_ESP32_VARIANT_DEFAULT_BOARD: dict[str, str] = {
-    "esp32": "esp32dev",
-    "esp32s2": "esp32-s2-saola-1",
-    "esp32s3": "esp32-s3-devkitc-1",
-    "esp32c2": "esp32-c2-devkitm-1",
-    "esp32c3": "esp32-c3-devkitm-1",
-    "esp32c5": "esp32-c5-devkitc-1",
-    "esp32c6": "esp32-c6-devkitc-1",
-    "esp32c61": "esp32-c61-devkitc1",
-    "esp32h2": "esp32-h2-devkitm-1",
-    # Pre-rev3 board on purpose: ES firmware boots on both silicon revisions,
-    # rev3-min firmware faults at boot on pre-rev3 chips.
-    "esp32p4": "esp32-p4-evboard",
-}
 
 # ESPHome esp32 board ids encode the chip variant (``esp32-p4-evboard``,
 # ``esp32-c6-devkitc-1``); infer it when a page gives ``board:`` but no
@@ -116,36 +128,6 @@ _ESP32_VARIANT_SUFFIXES = sorted(
 _ESP32_BOARD_VARIANT_RE = re.compile(
     r"esp32[-_]?(" + "|".join(_ESP32_VARIANT_SUFFIXES) + r")(?=[-_]|$)"
 )
-
-# Built-in radio defaults inferred from the SoC family / variant. ESP32
-# variants differ on what's built in: classic + S3 + C3 + C5 + C6 +
-# C61 carry both wifi + BLE; S2 has wifi only; H2 has BLE/Thread but
-# no wifi; P4 has neither built in. Onboard ethernet is *not* inferred
-# from the SoC here — it's mined from an explicit upstream ``ethernet:``
-# block by ``_extract_ethernet`` (which adds the ``ethernet`` flag).
-# Zigbee / matter still aren't mined; we have no reliable upstream signal.
-_SOC_CONNECTIVITY: dict[str, list[str]] = {
-    "esp8266": ["wifi"],
-    "bk72xx": ["wifi"],
-    "rp2040": ["wifi"],
-    "rtl87xx": ["wifi"],
-}
-
-# Per-variant overrides for the esp32 family. ``None`` means "no
-# built-in radio" (esp32p4) — we omit ``hardware.connectivity``
-# entirely so the manifest doesn't claim wifi the chip can't deliver.
-_ESP32_VARIANT_CONNECTIVITY: dict[str, list[str] | None] = {
-    "esp32": ["wifi", "bluetooth"],
-    "esp32s2": ["wifi"],
-    "esp32s3": ["wifi", "bluetooth"],
-    "esp32c2": ["wifi", "bluetooth"],
-    "esp32c3": ["wifi", "bluetooth"],
-    "esp32c5": ["wifi", "bluetooth"],
-    "esp32c6": ["wifi", "bluetooth"],
-    "esp32c61": ["wifi", "bluetooth"],
-    "esp32h2": ["bluetooth"],
-    "esp32p4": None,
-}
 
 # Top-level platform-list keys in ESPHome configs. Each list item
 # carries a ``platform: <stem>`` and we project to ``<domain>.<stem>``
@@ -207,67 +189,18 @@ _LOCKABLE_FIELD_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^inverted$"),
 ]
 
-# Strings that mark "user must fill this in" placeholders in upstream
-# YAML. Lifting them as featured-component presets would create an
-# entity that compiles but can't actually run — better to skip the
-# whole component and let the user add the underlying catalog entry
-# manually. Match is case-insensitive and substring-anchored.
-_PLACEHOLDER_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"\bfill\s*in\b", re.IGNORECASE),
-    re.compile(r"\breplace\s*me\b", re.IGNORECASE),
-    re.compile(r"<\s*replaceme\s*>", re.IGNORECASE),
-    re.compile(r"<[A-Z_][A-Z0-9_]*>"),  # <UNKNOWN>, <ADDRESS>, ...
-    re.compile(r"\byour[\s_-]+(key|address|token|id)\b", re.IGNORECASE),
-]
-
-# Template substitutions like ``${friendly_name}`` that upstream pages
-# resolve at runtime via ``substitutions:``. We don't carry the
-# substitutions block forward, so anything still containing one is
-# unsafe to surface as a preset value or as an ``occupied_by`` label.
+# Template substitutions like ``${friendly_name}``. The page's own
+# ``substitutions:`` block is resolved in ``_resolve_page_substitutions``,
+# so anything still containing one is an undefined reference (or the pass
+# was skipped) — unsafe to surface as a preset value or ``occupied_by`` label.
 _TEMPLATE_VAR_RE = re.compile(r"\$\{[^}]*\}")
 
-# Deprecated flat ``clk_mode: GPIO<n>_(IN|OUT)`` encodes the RMII clock
-# pin and direction in the mode string; folded into nested ``clk``
-# ``{mode, pin}`` (upstream removal 2026.9.0).
-_CLK_MODE_RE = re.compile(r"GPIO(\d+)_(IN|OUT)")
-
-# Hardware fields of a top-level ``ethernet:`` block worth locking as a
-# featured-component preset (the PHY/pinout). Network/runtime fields
-# (``manual_ip``, ``domain``, ``use_address``, ``mac_address``,
-# ``enable_on_boot``, ...) are user/site-specific and deliberately omitted.
-# Every key here is a real ``ethernet`` config_entry, so the locked preset
-# passes manifest validation.
-_ETHERNET_HW_FIELDS: frozenset[str] = frozenset(
-    {
-        "type",
-        "mdc_pin",
-        "mdio_pin",
-        "clk",
-        "clk_pin",
-        "phy_addr",
-        "power_pin",
-        "mosi_pin",
-        "miso_pin",
-        "cs_pin",
-        "interrupt_pin",
-        "reset_pin",
-        "clock_speed",
-    }
-)
-
-# Pin-valued ethernet fields → the ``occupied_by`` role shown in the pin
-# picker. ``clk`` is nested (``{pin, mode}``) and handled separately.
-_ETHERNET_PIN_ROLES: dict[str, str] = {
-    "mdc_pin": "Ethernet MDC",
-    "mdio_pin": "Ethernet MDIO",
-    "clk_pin": "Ethernet CLK",
-    "power_pin": "Ethernet Power",
-    "mosi_pin": "Ethernet MOSI",
-    "miso_pin": "Ethernet MISO",
-    "cs_pin": "Ethernet CS",
-    "interrupt_pin": "Ethernet INT",
-    "reset_pin": "Ethernet RESET",
-}
+# A leading token with no letter or digit (unicode-aware, so "Спот"
+# survives) is placeholder noise — a ``friendly_name: "***"`` fill-in
+# resolving into "*** Button". Only leading tokens are stripped: interior
+# separators ("gosund_sp111 - Status") and trailing symbols that
+# disambiguate ("Energy Meter kWh +" vs "Energy Meter kWh") are real.
+_ALNUM_RE = re.compile(r"[^\W_]")
 
 # Platforms we never lift, regardless of which domain hosts them. The
 # ``template`` family (``switch.template``, ``binary_sensor.template``,
@@ -337,74 +270,6 @@ class _SyncReport:
 
 
 # ---------------------------------------------------------------------------
-# YAML loader / dumper
-# ---------------------------------------------------------------------------
-
-
-class _TolerantSafeLoader(yaml.SafeLoader):
-    """
-    SafeLoader that swallows ESPHome-only tags as plain scalars/mappings.
-
-    The upstream device pages happily use ``!secret``, ``!lambda``,
-    ``!include``, ``!extend``, ``!remove``, ``!env_var``. The default
-    SafeLoader raises on those — we just want to keep parsing the
-    surrounding structure.
-    """
-
-
-def _passthrough_constructor(loader: yaml.SafeLoader, node: yaml.Node) -> Any:
-    """Construct *node* as the closest plain Python value, ignoring its tag."""
-    if isinstance(node, yaml.ScalarNode):
-        return loader.construct_scalar(node)
-    if isinstance(node, yaml.SequenceNode):
-        return loader.construct_sequence(node, deep=True)
-    if isinstance(node, yaml.MappingNode):
-        return loader.construct_mapping(node, deep=True)
-    return None
-
-
-for _tag in ("!secret", "!lambda", "!include", "!extend", "!remove", "!env_var"):
-    _TolerantSafeLoader.add_constructor(_tag, _passthrough_constructor)
-
-
-def _safe_load_yaml(text: str) -> Any:
-    """Parse YAML with the tolerant loader. Returns ``None`` on error."""
-    try:
-        # ``_TolerantSafeLoader`` only adds passthrough constructors for
-        # ESPHome-only tags — no arbitrary-object instantiation is
-        # reachable, so the bandit S506 warning here is a false positive.
-        return yaml.load(text, Loader=_TolerantSafeLoader)  # noqa: S506
-    except yaml.YAMLError:
-        return None
-
-
-class _ManifestDumper(yaml.SafeDumper):
-    """SafeDumper that produces stable, human-readable manifest YAML."""
-
-
-def _represent_str(dumper: yaml.SafeDumper, data: str) -> yaml.ScalarNode:
-    """Render strings with embedded newlines as ``|`` literal blocks."""
-    if "\n" in data:
-        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
-    return dumper.represent_scalar("tag:yaml.org,2002:str", data)
-
-
-_ManifestDumper.add_representer(str, _represent_str)
-
-
-def _dump_manifest(data: dict[str, Any]) -> str:
-    """Render a manifest dict to YAML in our preferred style."""
-    return yaml.dump(
-        data,
-        Dumper=_ManifestDumper,
-        default_flow_style=False,
-        sort_keys=False,
-        allow_unicode=True,
-        width=100,
-    )
-
-
-# ---------------------------------------------------------------------------
 # Repo cache
 # ---------------------------------------------------------------------------
 
@@ -435,21 +300,6 @@ def _ensure_devices_repo(*, pull: bool = True) -> Path | None:
         clone_fail_level=logging.ERROR,
         pull_fail_level=logging.ERROR,
     )
-
-
-def _get_repo_revision(repo: Path) -> str:
-    """Return the current commit SHA, or empty string on failure."""
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return result.stdout.strip()
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -508,6 +358,8 @@ def _first_config_yaml(body: str, device_dir: Path) -> tuple[dict[str, Any], str
     """
     First parseable ``yaml`` config fence as ``(parsed, raw_text)``, following ``file=``.
 
+    *parsed* has the page's ``substitutions:`` block resolved over the tree.
+
     A device page often splits optional snippets across separate fences. The
     onboard ``ethernet:`` block (real hardware we lift) is sometimes a standalone
     fence after the base config, so fold just that one into the primary fence when
@@ -540,7 +392,7 @@ def _first_config_yaml(body: str, device_dir: Path) -> tuple[dict[str, Any], str
         # edits to it. An inline fence is already in *body* — leave it be.
         if ethernet_text is not None and ethernet_text not in body:
             text = f"{text}\n{ethernet_text}"
-    return parsed, text
+    return _resolve_page_substitutions(parsed, device_dir.name), text
 
 
 def _extract_local_images(body: str, device_dir: Path) -> list[str]:
@@ -571,9 +423,32 @@ def _extract_local_images(body: str, device_dir: Path) -> list[str]:
     return seen
 
 
-def _hash_content(text: str) -> str:
-    """Return the SHA-256 hex digest of *text*."""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+def _resolve_page_substitutions(parsed: dict[str, Any], folder: str) -> dict[str, Any]:
+    """
+    Resolve the page's own ``substitutions:`` block over the config tree.
+
+    Unresolved references stay literal; a failed pass returns *parsed*
+    unchanged.
+    """
+    subs = parsed.get("substitutions")
+    if not isinstance(subs, dict) or not subs:
+        return parsed
+    try:
+        resolved = do_substitution_pass(OrderedDict(parsed))
+    except Exception as err:
+        _LOGGER.warning("substitution pass failed for %s: %s", folder, err)
+        return parsed
+    resolved.pop("substitutions", None)
+    return _plain_tree(resolved)
+
+
+def _plain_tree(value: Any) -> Any:
+    """Rebuild dict/list subclasses (``substitute`` emits OrderedDict) as plain builtins."""
+    if isinstance(value, dict):
+        return {k: _plain_tree(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_plain_tree(v) for v in value]
+    return value
 
 
 def _iter_devices(repo: Path) -> Iterator[_DeviceSource]:
@@ -618,13 +493,6 @@ def _slugify(name: str) -> str:
     """Lowercase and underscore-normalize *name* for use as a board id."""
     slug = re.sub(r"[^a-z0-9]+", "_", name.lower())
     return slug.strip("_")
-
-
-def _gpio_number(raw: Any) -> int | None:
-    """Extract a GPIO integer from any supported ESPHome pin shorthand."""
-    if isinstance(raw, dict):
-        return _gpio_number(raw.get("number"))
-    return parse_board_gpio(raw)
 
 
 def _normalize_pin_value(raw: Any) -> Any:
@@ -724,11 +592,16 @@ def _resolve_board_and_variant(
 
     if soc == "esp32":
         if board and not variant:
-            # Import-time resolver (connectivity is frozen here from the variant);
-            # the catalog's authoritative ``_backfill_esp32_variants`` runs later
-            # and only fixes ``esphome.variant``, not ``hardware.connectivity``.
             match = _ESP32_BOARD_VARIANT_RE.search(board.lower())
             variant = f"esp32{match.group(1)}" if match else None
+            if variant is None:
+                # PIO board ids that don't encode the variant (``esp32s3box``)
+                # resolve through esphome's authoritative board map — the
+                # manifest must carry the variant or the generated ``esp32:``
+                # block reads as an unknown board.
+                from script.sync_boards import esp32_variant_for_board
+
+                variant = esp32_variant_for_board(board)
         elif not board and variant:
             board = _ESP32_VARIANT_DEFAULT_BOARD.get(variant)
 
@@ -791,9 +664,30 @@ def _extract_featured_components(
 
     survivors = _select_survivors(candidates)
     id_map = _build_id_map(survivors)
-    featured = [_finalize_entry(c, id_map) for c in survivors]
-    bundles = _build_bundles(survivors, id_map)
+    finalized = [(c, _finalize_entry(c, id_map)) for c in survivors]
+    kept: list[tuple[_Candidate, dict[str, Any]]] = []
+    for candidate, entry in finalized:
+        missing = _missing_required_ref(candidate.component, entry["fields"])
+        if missing is None:
+            kept.append((candidate, entry))
+            continue
+        # The ref target didn't survive (or points at a nested sub-entity id
+        # we can't carry) — without it the entry fails ESPHome validation.
+        _LOGGER.info(
+            "Dropping %s: required reference %r is unresolvable", candidate.component_id, missing
+        )
+    featured = [entry for _, entry in kept]
+    bundles = _build_bundles([candidate for candidate, _ in kept], id_map)
     return featured, bundles, gpio_occupancy
+
+
+def _missing_required_ref(component: dict[str, Any], fields: dict[str, Any]) -> str | None:
+    """Key of a required ``type: "id"`` config entry absent from *fields*, or ``None``."""
+    for ce in component.get("config_entries") or []:
+        key = ce.get("key")
+        if ce.get("type") == "id" and ce.get("required") and key and key not in fields:
+            return key
+    return None
 
 
 def _select_survivors(candidates: list[_Candidate]) -> list[_Candidate]:
@@ -904,7 +798,8 @@ def _build_candidate(  # noqa: PLR0911 — distinct skip reasons each get their 
         return None
     local_occupancy: dict[int, str] = {}
     fields = _extract_fields(item, component, local_occupancy, component_id)
-    # ``None`` means an unfillable placeholder ("(FILL IN ...)").
+    # ``None`` means an unfillable placeholder ("(FILL IN ...)") or a
+    # required field whose value we couldn't represent.
     if fields is None:
         return None
     # ``{}`` is fine when the inline item carries a ``type: "id"`` ref
@@ -1184,9 +1079,11 @@ def _extract_fields(
     rename friction or duplicate-id collisions.
 
     Returns ``None`` when the upstream item carries an unfillable
-    placeholder (e.g. ``address: (FILL IN ONE-WIRE BUS ADDRESS)``).
-    The caller drops the whole featured-component entry in that case
-    rather than emit a preset that would compile but not run.
+    placeholder (e.g. ``address: (FILL IN ONE-WIRE BUS ADDRESS)``) or
+    sets a catalog-required field to a value we can't represent. The
+    caller drops the whole featured-component entry in either case
+    rather than emit a preset that would compile but not run — or, for
+    a lost required field, not even compile.
     """
     valid_keys: dict[str, dict[str, Any]] = {}
     for ce in component.get("config_entries") or []:
@@ -1204,6 +1101,16 @@ def _extract_fields(
         if _is_placeholder_value(fval):
             return None
         preset = _coerce_field_preset(ce, fval, fkey, inline_item, gpio_occupancy, component_id)
+        if preset is None and ce.get("required") and ce.get("type") != "id":
+            # id-typed refs are intentionally deferred to pass 2; every
+            # other required field the page set but we couldn't carry
+            # would ship an entry that fails ESPHome validation.
+            _LOGGER.info(
+                "Dropping %s: required field %r has an unrepresentable value",
+                component_id,
+                fkey,
+            )
+            return None
         if preset is not None:
             out[fkey] = preset
     return out
@@ -1222,8 +1129,10 @@ def _coerce_field_preset(  # noqa: PLR0911 — distinct field shapes each get th
 
     Pin entries record GPIO occupancy and emit a ``locked`` preset.
     Cross-component id references are dropped (the user picks at add
-    time). Other simple scalars come through as either locked presets
-    (when the field name looks hardware-fixed) or bare suggestions.
+    time). Data-only nested values (``dimensions``, ``data_pins``,
+    ``init_sequence``) lock verbatim. Other simple scalars come through
+    as either locked presets (when the field name looks hardware-fixed)
+    or bare suggestions.
     """
     ce_type = config_entry.get("type")
     if ce_type == "pin":
@@ -1237,6 +1146,10 @@ def _coerce_field_preset(  # noqa: PLR0911 — distinct field shapes each get th
             return {"value": normalized, "locked": True}
         gpio = _gpio_number(normalized)
         if gpio is None:
+            if isinstance(normalized, str) and _NAMED_PIN_RE.fullmatch(normalized):
+                # Board pin aliases (``TX1``, ``D5``, ``A0``) are valid values
+                # ESPHome resolves per-board; no board GPIO to mark occupied.
+                return {"value": normalized, "locked": True}
             # Reference-style pins or lambdas — skip silently.
             return None
         label = _occupancy_label(inline_item, component_id)
@@ -1248,6 +1161,10 @@ def _coerce_field_preset(  # noqa: PLR0911 — distinct field shapes each get th
         # local id assigned — emitting them here would lock in the
         # raw upstream value before remapping.
         return None
+    if isinstance(raw_value, dict | list):
+        return _coerce_data_tree(
+            config_entry, raw_value, field_name, inline_item, gpio_occupancy, component_id
+        )
     if not _is_simple_scalar(raw_value):
         return None
     if _looks_lockable(field_name):
@@ -1279,6 +1196,92 @@ def _coerce_pin_list(
     return {"value": normalized, "locked": True}
 
 
+# Field names whose nested value is a group of board pins (``data_pins``);
+# porches / dimensions / init sequences don't match.
+_PIN_TREE_FIELD_RE = re.compile(r"(?:^|_)pins?$")
+
+# Board pin alias names (``TX1``, ``D5``, ``A0``, ``SCL``): short uppercase
+# tokens — id references and lambdas are lowercase / longer, substitutions
+# start with ``$``, and numeric GPIO forms parse before this is consulted.
+_NAMED_PIN_RE = re.compile(r"[A-Z][A-Z0-9]{0,7}")
+
+
+def _coerce_data_tree(
+    config_entry: dict[str, Any],
+    raw_value: dict[str, Any] | list[Any],
+    field_name: str,
+    inline_item: dict[str, Any],
+    gpio_occupancy: dict[int, str],
+    component_id: str,
+) -> dict[str, Any] | None:
+    """
+    Lock a data-only nested value (``dimensions``, ``data_pins``, ``init_sequence``).
+
+    ``None`` when the shape doesn't match the catalog entry, a leaf is
+    templated / placeholder, or the entry could carry an id reference we
+    can't remap. Pin-group fields record every GPIO leaf as occupied.
+    """
+    ce_type = config_entry.get("type")
+    if ce_type != "nested" and not (
+        isinstance(raw_value, list) and config_entry.get("multi_value")
+    ):
+        return None
+    if not _is_data_only_tree(raw_value):
+        return None
+    if _ce_has_id_descendant(config_entry) or _tree_has_id_keys(raw_value):
+        return None
+    if _PIN_TREE_FIELD_RE.search(field_name):
+        label = _occupancy_label(inline_item, component_id)
+        _record_pin_tree_occupancy(raw_value, label, gpio_occupancy)
+    return {"value": raw_value, "locked": True}
+
+
+def _is_data_only_tree(value: Any) -> bool:
+    """Return True for a non-empty dict/list tree of round-trippable scalar leaves."""
+    if isinstance(value, dict):
+        return bool(value) and all(
+            isinstance(key, str) and _is_data_only_tree(item) for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return bool(value) and all(_is_data_only_tree(item) for item in value)
+    return _is_simple_scalar(value) and not _is_placeholder_value(value)
+
+
+def _tree_has_id_keys(value: Any) -> bool:
+    """Return True when any dict key in the tree is ``id`` or ``*_id``."""
+    if isinstance(value, dict):
+        return any(
+            (isinstance(key, str) and (key == "id" or key.endswith("_id")))
+            or _tree_has_id_keys(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_tree_has_id_keys(item) for item in value)
+    return False
+
+
+def _ce_has_id_descendant(config_entry: dict[str, Any]) -> bool:
+    """Return True when any nested config entry of *config_entry* is id-typed."""
+    for sub in config_entry.get("config_entries") or []:
+        if sub.get("type") == "id" or _ce_has_id_descendant(sub):
+            return True
+    return False
+
+
+def _record_pin_tree_occupancy(value: Any, label: str, gpio_occupancy: dict[int, str]) -> None:
+    """Record every GPIO leaf of a pin-group tree (``data_pins``) as occupied."""
+    if isinstance(value, dict):
+        for item in value.values():
+            _record_pin_tree_occupancy(item, label, gpio_occupancy)
+    elif isinstance(value, list):
+        for item in value:
+            _record_pin_tree_occupancy(item, label, gpio_occupancy)
+    else:
+        gpio = _gpio_number(_normalize_pin_value(value))
+        if gpio is not None:
+            gpio_occupancy.setdefault(gpio, label)
+
+
 def _occupancy_label(inline_item: dict[str, Any], component_id: str) -> str:
     """
     Build a human-readable label for a GPIO's ``occupied_by`` field.
@@ -1295,27 +1298,23 @@ def _clean_entity_name(inline_item: dict[str, Any]) -> str:
     """
     Pick a readable entity name from an inline-yaml item.
 
-    Returns the upstream ``name:`` / ``id:`` value with any
-    ``${...}`` template substitutions removed and surrounding
-    whitespace / separators trimmed. Returns an empty string when no
-    readable label remains — callers fall back to a derived default.
+    Returns the upstream ``name:`` / ``id:`` value with ``${...}``
+    template substitutions and leading symbol-only placeholder tokens
+    removed and surrounding whitespace / separators trimmed. Returns an
+    empty string when no readable label remains — callers fall back to a
+    derived default.
     """
     for key in ("name", "id"):
         candidate = inline_item.get(key)
         if not isinstance(candidate, str):
             continue
-        cleaned = _TEMPLATE_VAR_RE.sub("", candidate).strip(" -_")
-        cleaned = re.sub(r"\s+", " ", cleaned)
+        tokens = _TEMPLATE_VAR_RE.sub("", candidate).split()
+        while tokens and not _ALNUM_RE.search(tokens[0]):
+            tokens.pop(0)
+        cleaned = " ".join(tokens).strip(" -_")
         if cleaned:
             return cleaned
     return ""
-
-
-def _is_placeholder_value(value: Any) -> bool:
-    """Return True for upstream "user must fill this in" sentinel strings."""
-    if not isinstance(value, str):
-        return False
-    return any(p.search(value) for p in _PLACEHOLDER_PATTERNS)
 
 
 def _is_simple_scalar(value: Any) -> bool:
@@ -1323,23 +1322,16 @@ def _is_simple_scalar(value: Any) -> bool:
     if value is None or isinstance(value, bool | int | float):
         return True
     if isinstance(value, str):
-        # Keep things short — long strings are usually templated names
-        # we don't want to lock the user into.
-        return "${" not in value and "\n" not in value and len(value) <= 80
+        # Keep things short — long strings are usually templated names we
+        # don't want to lock the user into. ``$`` covers both substitution
+        # forms (``${var}`` and bare ``$var``).
+        return "$" not in value and "\n" not in value and len(value) <= 80
     return False
 
 
 def _looks_lockable(field_name: str) -> bool:
     """Return True for field names that look hardware-fixed (pin, inverted, ...)."""
     return any(p.search(field_name) for p in _LOCKABLE_FIELD_PATTERNS)
-
-
-def _build_pins(gpio_occupancy: dict[int, str]) -> list[dict[str, Any]]:
-    """Synthesize one minimal pin entry per GPIO referenced by featured components."""
-    return [
-        {"gpio": gpio, "available": False, "occupied_by": gpio_occupancy[gpio]}
-        for gpio in sorted(gpio_occupancy)
-    ]
 
 
 def _build_tags(name: str, type_field: str | None) -> list[str]:
@@ -1354,88 +1346,105 @@ def _build_tags(name: str, type_field: str | None) -> list[str]:
     return tags
 
 
-def _eth_value_safe(value: Any) -> bool:
-    """Return True when *value* carries no ``${...}`` template or fill-in placeholder."""
-    if isinstance(value, str):
-        return "${" not in value and not _is_placeholder_value(value)
-    if isinstance(value, dict):
-        return all(_eth_value_safe(v) for v in value.values())
-    if isinstance(value, list):
-        return all(_eth_value_safe(v) for v in value)
-    return True
-
-
-def _normalized_clk(eth: dict[str, Any]) -> dict[str, Any] | None:
-    """Fold deprecated flat ``clk_mode`` into nested ``clk``; ``None`` when unmappable."""
-    if "clk_mode" not in eth:
-        return eth
-    # clk_mode exists only in upstream's RMII schema (SPI PHYs use clk_pin);
-    # a block carrying it without the RMII-required mdc_pin is invalid upstream.
-    if "mdc_pin" not in eth:
-        return None
-    without = {k: v for k, v in eth.items() if k != "clk_mode"}
-    if "clk" in eth:
-        return without
-    clk_mode = eth["clk_mode"]
-    # Upstream validates with cv.enum(upper=True, space="_"); mirror it.
-    normalized = clk_mode.strip().upper().replace(" ", "_") if isinstance(clk_mode, str) else ""
-    match = _CLK_MODE_RE.fullmatch(normalized)
-    if match is None:
-        return None
-    mode = "CLK_EXT_IN" if match.group(2) == "IN" else "CLK_OUT"
-    return {**without, "clk": {"pin": f"GPIO{match.group(1)}", "mode": mode}}
-
-
-def _extract_ethernet(config: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[int, str]]:
+def _extract_psram(
+    config: dict[str, Any], components_index: dict[str, dict[str, Any]]
+) -> dict[str, Any] | None:
     """
-    Mine a top-level ``ethernet:`` block into a locked featured component.
+    Mine a top-level ``psram:`` block into a featured component.
 
-    Returns ``(featured_entry, gpio_occupancy)`` — the entry is ``None``
-    when there's no ``ethernet:`` block, it lacks a PHY ``type``, or any
-    hardware value is templated/placeholder (we never lock an unresolved
-    ``${...}``). Only the PHY/pinout fields are lifted; the pin GPIOs are
-    returned for the pin picker's occupancy map.
-
-    This only runs for imported boards. A board where upstream lacks an
-    ``ethernet:`` block, or whose ethernet must differ from upstream (a
-    second hardware revision), needs a hand-curated, non-``source`` board
-    the sync never overwrites — see ``gl_inet_gl_s10_v2``.
+    A display's framebuffer needs it at runtime even though the config
+    validates without it, so a page configuring PSRAM keeps it.
     """
-    eth = config.get("ethernet")
-    if not isinstance(eth, dict) or not isinstance(eth.get("type"), str):
-        return None, {}
-    eth = _normalized_clk(eth)
-    if eth is None:
-        return None, {}
+    if "psram" not in config:
+        return None
+    component = components_index.get("psram")
+    if component is None:
+        return None
+    block = config.get("psram")
     fields: dict[str, Any] = {}
-    occupancy: dict[int, str] = {}
-    for key, value in eth.items():
-        if key not in _ETHERNET_HW_FIELDS:
+    if isinstance(block, dict):
+        extracted = _extract_fields(block, component, {}, "psram")
+        if extracted is None:
+            return None
+        fields = extracted
+    return {"id": "onboard_psram", "component_id": "psram", "name": "PSRAM", "fields": fields}
+
+
+# PSRAM-capable allocation markers in esphome component sources; a component
+# dir using one puts large runtime buffers (framebuffers, audio pipelines)
+# in PSRAM when the device provides it.
+_PSRAM_ALLOC_RE = re.compile(r"ExternalRAMAllocator|RAMAllocator|MALLOC_CAP_SPIRAM")
+_SOURCE_SUFFIXES = frozenset({".h", ".hpp", ".c", ".cpp", ".py"})
+
+
+@functools.cache
+def _psram_allocating_components() -> frozenset[str]:
+    """
+    Names of installed esphome components whose sources allocate from PSRAM.
+
+    The schema carries no PSRAM signal (a display like st7701s validates
+    without it, so it never declares the dep), so the C++/py sources are
+    the only derivable truth. Base domains (``display``) cover every
+    platform of the domain; platform components (``i2s_audio``) cover
+    their own leaves. Empty when esphome isn't installed.
+    """
+    spec = importlib.util.find_spec("esphome")
+    if spec is None or not spec.submodule_search_locations:
+        return frozenset()
+    components = Path(spec.submodule_search_locations[0]) / "components"
+    if not components.is_dir():
+        return frozenset()
+    allocating: set[str] = set()
+    for child in sorted(components.iterdir()):
+        if not child.is_dir():
             continue
-        if not _eth_value_safe(value):
-            return None, {}
-        if key in _ETHERNET_PIN_ROLES:
-            # A pin field that doesn't resolve to a concrete GPIO (a
-            # ``!secret`` tag, a lambda, ...) can't be locked into a valid
-            # preset — distrust the whole block rather than emit garbage.
-            gpio = _gpio_number(value)
-            if gpio is None:
-                return None, {}
-            occupancy[gpio] = _ETHERNET_PIN_ROLES[key]
-        fields[key] = {"value": value, "locked": True}
-    clk = eth.get("clk")
-    if isinstance(clk, dict):
-        gpio = _gpio_number(clk.get("pin"))
-        if gpio is None:
-            return None, {}
-        occupancy[gpio] = "Ethernet CLK"
-    entry = {
-        "id": "onboard_ethernet",
-        "component_id": "ethernet",
-        "name": "Onboard Ethernet",
-        "fields": fields,
-    }
-    return entry, occupancy
+        for source in child.rglob("*"):
+            if source.suffix not in _SOURCE_SUFFIXES:
+                continue
+            try:
+                text = source.read_text(encoding="utf-8", errors="ignore")
+            except OSError as exc:
+                # An unreadable source silently shrinks the allocating set —
+                # and the cached result makes the omission sticky for the run.
+                _LOGGER.warning("Skipping unreadable esphome source %s: %s", source, exc)
+                continue
+            if _PSRAM_ALLOC_RE.search(text):
+                allocating.add(child.name)
+                break
+    return frozenset(allocating)
+
+
+def _needs_psram(component_id: str, components_index: dict[str, dict[str, Any]]) -> bool:
+    """Whether a featured leaf's component puts large runtime buffers in PSRAM."""
+    component = components_index.get(component_id) or {}
+    if "psram" in (component.get("dependencies") or []):
+        return True
+    allocating = _psram_allocating_components()
+    domain, _, stem = component_id.partition(".")
+    return domain in allocating or (bool(stem) and stem in allocating)
+
+
+def _lift_psram(
+    config: dict[str, Any],
+    featured: list[dict[str, Any]],
+    components_index: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Prepend the page's ``psram:`` lift and stamp it on PSRAM-allocating leaves.
+
+    Gated on *featured* being non-empty so a psram-only page stays unimportable.
+    """
+    psram_entry = _extract_psram(config, components_index) if featured else None
+    if psram_entry is None:
+        if featured and "psram" in config:
+            # The page configured PSRAM but the lift failed (placeholder
+            # value or missing catalog entry) — the device ships unstamped.
+            _LOGGER.warning("Dropping psram lift: the page's psram: block can't be represented")
+        return featured
+    for entry in featured:
+        if _needs_psram(entry["component_id"], components_index):
+            entry["requires"] = [*(entry.get("requires") or []), psram_entry["id"]]
+    return [psram_entry, *featured]
 
 
 def _as_block_list(raw: Any) -> list[Any]:
@@ -1500,15 +1509,60 @@ def _collect_expander_refs(
     return consumers, ordered_refs
 
 
+@dataclass(frozen=True)
+class _LiftState:
+    """Shared state threaded through the bus / hub lift passes.
+
+    The holder is frozen; the containers inside mutate as lifts accumulate.
+    """
+
+    config: dict[str, Any]
+    components_index: dict[str, dict[str, Any]]
+    used_ids: set[str]
+    bus_local: dict[tuple[str, str | None], str] = field(default_factory=dict)
+    occupancy: dict[int, str] = field(default_factory=dict)
+    extra: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _lookup_bus(state: _LiftState, dep: str, instance: str | None) -> str | None:
+    """
+    Find an already-lifted bus for ``(dep, instance)``.
+
+    A ref-less dep resolves to the sole page block, which may already be
+    lifted under its explicit ``id`` (a hub whose chained bus dep also
+    appears as a direct dep) — look it up by that id before materializing.
+    """
+    local = state.bus_local.get((dep, instance))
+    if local is not None:
+        return local
+    if instance is not None:
+        return None
+    block = _select_block(state.config, dep, None)
+    block_id = block.get("id") if isinstance(block, dict) else None
+    return state.bus_local.get((dep, block_id)) if isinstance(block_id, str) else None
+
+
+def _register_bus_keys(
+    state: _LiftState, domain: str, key: tuple[str, str | None], entry: dict[str, Any], local: str
+) -> None:
+    """
+    Memoize a lifted bus under its lookup key and its canonical id key.
+
+    A sole bus resolved without a ref (``(domain, None)``) still carries its
+    block's ``id``; a later consumer naming that id explicitly must find the
+    same entry or it lifts a duplicate.
+    """
+    state.bus_local[key] = local
+    raw_id = (entry.get("fields") or {}).get("id")
+    actual = raw_id.get("value") if isinstance(raw_id, dict) else None
+    if isinstance(actual, str) and (domain, actual) != key:
+        state.bus_local[(domain, actual)] = local
+
+
 def _ensure_buses(
     hub_component: dict[str, Any],
     hub_block: dict[str, Any],
-    config: dict[str, Any],
-    components_index: dict[str, dict[str, Any]],
-    used_ids: set[str],
-    bus_local: dict[tuple[str, str | None], str],
-    occupancy: dict[int, str],
-    extra: list[dict[str, Any]],
+    state: _LiftState,
 ) -> tuple[list[str], dict[str, str]]:
     """
     Materialize (once) the bus each hub dependency resolves to.
@@ -1525,22 +1579,70 @@ def _ensure_buses(
         instance = hub_block.get(ref_field)
         instance = instance if isinstance(instance, str) and instance else None
         key = (dep, instance)
-        local = bus_local.get(key)
+        local = _lookup_bus(state, dep, instance)
         if local is None:
-            bus_entry, local, bus_occ = _materialize_bus(
-                dep, instance, config, components_index, used_ids
-            )
+            bus_entry, local, bus_occ = _materialize_bus(dep, instance, state)
             if bus_entry is None:
                 continue
-            used_ids.add(local)
-            bus_local[key] = local
-            occupancy.update(bus_occ)
-            extra.append(bus_entry)
+            state.used_ids.add(local)
+            _register_bus_keys(state, dep, key, bus_entry, local)
+            state.occupancy.update(bus_occ)
+            state.extra.append(bus_entry)
+            _chain_bus_deps(bus_entry, dep, instance, state)
         if local not in bus_ids:
             bus_ids.append(local)
         if instance is not None:
             bus_refs[ref_field] = instance
     return bus_ids, bus_refs
+
+
+def _chain_bus_deps(
+    bus_entry: dict[str, Any],
+    bus_domain: str,
+    instance_id: str | None,
+    state: _LiftState,
+) -> None:
+    """
+    Chain a freshly lifted bus's own bus deps (``modbus`` rides ``uart``).
+
+    Without the chain the lifted bus fails ESPHome's dependency validation.
+    """
+    bus_component = state.components_index.get(bus_entry["component_id"])
+    bus_block = _select_block(state.config, bus_domain, instance_id)
+    if bus_component is None or bus_block is None:
+        return
+    sub_ids, sub_refs = _ensure_buses(bus_component, bus_block, state)
+    for sub_field, sub_instance in sub_refs.items():
+        bus_entry["fields"][sub_field] = {"value": sub_instance, "locked": True}
+    if sub_ids:
+        bus_entry["requires"] = sub_ids
+
+
+def _seed_bus_local(
+    featured: list[dict[str, Any]], components_index: dict[str, dict[str, Any]]
+) -> dict[tuple[str, str | None], str]:
+    """
+    Map already-featured buses so later lifts reuse them instead of duplicating.
+
+    Keyed like ``_ensure_buses`` resolves deps: ``(domain, upstream id)`` for a
+    bus with a locked id, plus ``(domain, None)`` when it is the domain's sole
+    featured bus.
+    """
+    seeded: dict[tuple[str, str | None], str] = {}
+    by_domain: dict[str, list[str]] = {}
+    for entry in featured:
+        domain = entry["component_id"].partition(".")[0]
+        if not _is_bus_dep(domain, components_index):
+            continue
+        raw_id = (entry.get("fields") or {}).get("id")
+        instance = raw_id.get("value") if isinstance(raw_id, dict) else None
+        if isinstance(instance, str):
+            seeded[(domain, instance)] = entry["id"]
+        by_domain.setdefault(domain, []).append(entry["id"])
+    for domain, local_ids in by_domain.items():
+        if len(local_ids) == 1:
+            seeded.setdefault((domain, None), local_ids[0])
+    return seeded
 
 
 def _wire_consumer_requires(
@@ -1610,12 +1712,27 @@ def _block_platform(bus_domain: str, block: dict[str, Any]) -> str | None:
     return platform if isinstance(platform, str) and platform else None
 
 
+def _select_block(
+    config: dict[str, Any], domain: str, instance_id: str | None
+) -> dict[str, Any] | None:
+    """
+    Select the page block a bus/hub lift reads: the ``id``-matched, else the sole block.
+
+    A bare key (``modbus:`` / ``tuya:`` with a null body) selects as an empty block.
+    """
+    raw = config.get(domain)
+    if raw is None:
+        return {} if domain in config and instance_id is None else None
+    blocks = _block_mappings(raw)
+    if instance_id is not None:
+        return next((b for b in blocks if b.get("id") == instance_id), None)
+    return blocks[0] if len(blocks) == 1 else None
+
+
 def _materialize_bus(
     bus_domain: str,
     instance_id: str | None,
-    config: dict[str, Any],
-    components_index: dict[str, dict[str, Any]],
-    used_ids: set[str],
+    state: _LiftState,
 ) -> tuple[dict[str, Any] | None, str, dict[int, str]]:
     """
     Lift the bus a consumer depends on into a featured entry, both bus shapes.
@@ -1630,16 +1747,10 @@ def _materialize_bus(
     when the bus is absent, ambiguous (no ``*_id`` and more than one bus), or a
     platform-style block has no resolvable ``platform:``.
     """
-    blocks = _block_mappings(config.get(bus_domain))
-    if instance_id is not None:
-        block = next((b for b in blocks if b.get("id") == instance_id), None)
-    elif len(blocks) == 1:
-        block = blocks[0]
-    else:
-        block = None
+    block = _select_block(state.config, bus_domain, instance_id)
     if block is None:
         return None, "", {}
-    component = components_index.get(bus_domain)
+    component = state.components_index.get(bus_domain)
     if component is not None:
         component_id = bus_domain
     else:
@@ -1647,12 +1758,14 @@ def _materialize_bus(
         if platform is None:
             return None, "", {}
         component_id = f"{bus_domain}.{platform}"
-        component = components_index.get(component_id)
+        component = state.components_index.get(component_id)
         if component is None:
             return None, "", {}
     # A hub binds several deps and ``_ensure_buses`` calls this for each, so confirm
-    # the resolved component is a bus (the id was never the filter).
-    if not _is_bus_category(component):
+    # the resolved component is a bus — or a platform-style provider whose
+    # category equals its domain (``time.homeassistant`` -> ``time``), the same
+    # convention one_wire/canbus use (the id was never the filter).
+    if not _is_bus_category(component) and component.get("category") != bus_domain:
         return None, "", {}
     bus_inst = block.get("id")
     bus_inst = bus_inst if isinstance(bus_inst, str) and bus_inst else None
@@ -1662,7 +1775,9 @@ def _materialize_bus(
         return None, "", {}
     if bus_inst:
         fields["id"] = {"value": bus_inst, "locked": True}
-    local_id = _unique_local_id(_sanitize_local_id(bus_inst or ""), used_ids, f"{bus_domain}_bus")
+    local_id = _unique_local_id(
+        _sanitize_local_id(bus_inst or ""), state.used_ids, f"{bus_domain}_bus"
+    )
     return {"id": local_id, "component_id": component_id, "fields": fields}, local_id, occupancy
 
 
@@ -1718,9 +1833,12 @@ def _materialize_hubs(
     lift and drops a consumer whose hub didn't materialize.
     """
     used_ids = {entry["id"] for entry in featured}
-    extra: list[dict[str, Any]] = []
-    occupancy: dict[int, str] = {}
-    bus_local: dict[tuple[str, str | None], str] = {}
+    state = _LiftState(
+        config=config,
+        components_index=components_index,
+        used_ids=used_ids,
+        bus_local=_seed_bus_local(featured, components_index),
+    )
     # Each materialized hub keyed by its ref, carrying the local id + the bus
     # ids it needs — the ordered prerequisite chain a consumer references.
     hub_prereqs: dict[tuple[str, str | None], list[str]] = {}
@@ -1730,23 +1848,29 @@ def _materialize_hubs(
         block = resolve_block(hub_cid, instance_id)
         if hub_component is None or block is None:
             continue
+        # A platform-carrying block (``time: platform: homeassistant``) is a
+        # platform-style hub: the schema and the emitted component id live at
+        # ``<domain>.<platform>``, not the bare domain.
+        component_cid = hub_cid
+        platform = block.get("platform")
+        if isinstance(platform, str) and f"{hub_cid}.{platform}" in components_index:
+            component_cid = f"{hub_cid}.{platform}"
+            hub_component = components_index[component_cid]
         # Record the hub's own pin occupancy locally and merge only on success:
         # a shift-register hub puts board GPIOs (data/clock/latch) here, and a
         # placeholder field part-way through the block must not leave those pins
         # marked occupied for a hub we then drop.
         hub_occ: dict[int, str] = {}
-        fields = _extract_fields(block, hub_component, hub_occ, hub_cid)
-        if fields is None or (driver and not fields):
+        fields = _extract_fields(block, hub_component, hub_occ, component_cid)
+        if fields is None:
             continue
         if driver and not _required_pin_keys(hub_component) <= fields.keys():
             # A required pin didn't parse (lambda / reference): skip the hub and
             # leave ``requires`` unstamped so the dep banner covers it, rather than
             # ship a pinless hub that compiles into an invalid config.
             continue
-        occupancy.update(hub_occ)
-        bus_ids, bus_refs = _ensure_buses(
-            hub_component, block, config, components_index, used_ids, bus_local, occupancy, extra
-        )
+        state.occupancy.update(hub_occ)
+        bus_ids, bus_refs = _ensure_buses(hub_component, block, state)
         base = _sanitize_local_id(instance_id) if instance_id else ""
         hub_id = _unique_local_id(base, used_ids, f"{hub_cid}{'_hub' if driver else ''}")
         used_ids.add(hub_id)
@@ -1758,16 +1882,16 @@ def _materialize_hubs(
         # doesn't fall back to esphome's default i2c pins.
         for ref_field, bus_inst in bus_refs.items():
             fields[ref_field] = {"value": bus_inst, "locked": True}
-        hub_entry: dict[str, Any] = {"id": hub_id, "component_id": hub_cid, "fields": fields}
+        hub_entry: dict[str, Any] = {"id": hub_id, "component_id": component_cid, "fields": fields}
         if bus_ids:
             hub_entry["requires"] = bus_ids
-        extra.append(hub_entry)
+        state.extra.append(hub_entry)
         hub_prereqs[(hub_cid, instance_id)] = [*bus_ids, hub_id]
 
     if not driver:
         _drop_unresolved_consumers(featured, consumers, hub_prereqs)
     _wire_consumer_requires(consumers, hub_prereqs)
-    return extra, occupancy
+    return state.extra, state.occupancy
 
 
 def _required_pin_keys(component: dict[str, Any]) -> set[str]:
@@ -1781,23 +1905,22 @@ def _required_pin_keys(component: dict[str, Any]) -> set[str]:
 
 def _is_driver_hub(component: dict[str, Any]) -> bool:
     """
-    Return True for a hub a consumer binds by catalog dependency that owns board pins.
+    Return True for a hub a consumer binds by catalog dependency.
 
-    LED-driver hubs (``bp5758d``, ``sm2135``, ...) sit as a top-level block with
-    their own ``clock_pin`` / ``data_pin`` and are pulled in by an
-    ``output.<driver>`` platform's ``dependencies`` rather than by a pin
-    reference. Buses (``i2c`` / ``spi`` / ``uart``) are excluded — a hub's own
-    bus is materialized through ``_ensure_buses`` instead.
+    Pin-owning LED-driver hubs (``bp5758d``), bus-attached ones (``tuya``,
+    ``ads1115``, ``modbus_controller``), and pin-less providers (``i2s_audio``)
+    all qualify: without the top-level block the consumer fails ESPHome's
+    dependency validation. Buses are excluded — a hub's own bus is
+    materialized through ``_ensure_buses`` — and featured-excluded categories
+    (core / ota / time / update) belong to the base config, not the manifest.
     """
-    if component.get("category") == "bus":
-        return False
-    return any(ce.get("type") == "pin" for ce in component.get("config_entries") or [])
+    category = component.get("category")
+    return category not in BUS_CATEGORIES and category not in FEATURED_EXCLUDED_CATEGORIES
 
 
-def _sole_hub_block(raw: Any) -> dict[str, Any] | None:
-    """Return the single top-level hub mapping, or ``None`` if absent/ambiguous."""
-    blocks = _block_mappings(raw)
-    return blocks[0] if len(blocks) == 1 else None
+def _dep_already_featured(dep: str, existing_cids: set[str]) -> bool:
+    """Whether *dep* is met by a featured entry, exactly or as ``<dep>.<platform>``."""
+    return dep in existing_cids or any(cid.startswith(f"{dep}.") for cid in existing_cids)
 
 
 def _collect_driver_hub_refs(
@@ -1822,12 +1945,12 @@ def _collect_driver_hub_refs(
             continue
         refs: list[tuple[str, str | None]] = []
         for dep in component.get("dependencies") or []:
-            if not isinstance(dep, str) or dep in existing_cids:
+            if not isinstance(dep, str) or _dep_already_featured(dep, existing_cids):
                 continue
             hub = components_index.get(dep)
             if hub is None or not _is_driver_hub(hub):
                 continue
-            block = _sole_hub_block(config.get(dep))
+            block = _select_block(config, dep, None)
             if block is None:
                 continue
             instance_id = block.get("id") if isinstance(block.get("id"), str) else None
@@ -1870,7 +1993,7 @@ def _extract_driver_hubs(
         components_index,
         consumers,
         ordered_refs,
-        resolve_block=lambda cid, _instance_id: _sole_hub_block(config.get(cid)),
+        resolve_block=lambda cid, _instance_id: _select_block(config, cid, None),
         driver=True,
     )
 
@@ -1905,14 +2028,16 @@ def _is_bus_dep(dep: str, components_index: dict[str, dict[str, Any]]) -> bool:
     Whether *dep* names one of ESPHome's buses, mapping- or platform-style.
 
     Mapping-style buses (i2c/spi/uart/modbus) resolve to a top-level component
-    whose category is ``"bus"``. Platform-style buses (one_wire/canbus) have no
-    top-level component; their schema lives under ``<dep>.<platform>`` and the
-    dep name itself equals the bus category, so it is matched against the set.
+    whose category is ``"bus"``. Platform-style deps (one_wire/canbus, and
+    non-bus providers like ``time``) have no top-level component; their schema
+    lives under ``<dep>.<platform>``, so any component-less dep is a
+    materialization candidate — ``_materialize_bus`` still requires a
+    platform-resolvable page block, so a stray dep name lifts nothing.
     """
     component = components_index.get(dep)
     if component is not None:
         return _is_bus_category(component)
-    return dep in BUS_CATEGORIES
+    return True
 
 
 def _collect_bus_dep_refs(
@@ -1950,7 +2075,7 @@ def _collect_bus_dep_refs(
         block = source_block or _find_consumer_block(config, entry)
         refs: list[tuple[str, str | None]] = []
         for dep in component.get("dependencies") or []:
-            if not isinstance(dep, str) or dep in existing_cids:
+            if not isinstance(dep, str) or _dep_already_featured(dep, existing_cids):
                 continue
             if not _is_bus_dep(dep, components_index):
                 continue
@@ -1989,22 +2114,31 @@ def _extract_bus_deps(
     consumers, ordered_refs = _collect_bus_dep_refs(config, featured, components_index)
     if not ordered_refs:
         return [], {}
-    used_ids = {entry["id"] for entry in featured}
-    extra: list[dict[str, Any]] = []
-    occupancy: dict[int, str] = {}
-    bus_local: dict[tuple[str, str | None], str] = {}
+    state = _LiftState(
+        config=config,
+        components_index=components_index,
+        used_ids={entry["id"] for entry in featured},
+        bus_local=_seed_bus_local(featured, components_index),
+    )
     for dep, instance in ordered_refs:
-        bus_entry, local, bus_occ = _materialize_bus(
-            dep, instance, config, components_index, used_ids
-        )
+        if _lookup_bus(state, dep, instance) is not None:
+            continue
+        bus_entry, local, bus_occ = _materialize_bus(dep, instance, state)
         if bus_entry is None:
             continue
-        used_ids.add(local)
-        bus_local[(dep, instance)] = local
-        occupancy.update(bus_occ)
-        extra.append(bus_entry)
-    _wire_consumer_requires(consumers, {ref: [local] for ref, local in bus_local.items()})
-    return extra, occupancy
+        state.used_ids.add(local)
+        _register_bus_keys(state, dep, (dep, instance), bus_entry, local)
+        state.occupancy.update(bus_occ)
+        state.extra.append(bus_entry)
+        _chain_bus_deps(bus_entry, dep, instance, state)
+    # Lock each consumer onto the specific bus it named upstream — on a
+    # multi-bus board the generated ``<bus>_id`` is otherwise ambiguous.
+    for entry, refs in consumers:
+        for dep, instance in refs:
+            if instance is not None and (dep, instance) in state.bus_local:
+                entry["fields"][f"{dep}_id"] = {"value": instance, "locked": True}
+    _wire_consumer_requires(consumers, {ref: [local] for ref, local in state.bus_local.items()})
+    return state.extra, state.occupancy
 
 
 def _make_record(  # noqa: C901, PLR0911, PLR0912 — distinct skip reasons each get their own early exit
@@ -2046,6 +2180,7 @@ def _make_record(  # noqa: C901, PLR0911, PLR0912 — distinct skip reasons each
     if eth_entry is not None:
         featured = [eth_entry, *featured]
         gpio_occupancy = {**eth_occupancy, **gpio_occupancy}
+    featured = _lift_psram(src.config_yaml, featured, components_index)
     # Lift the prerequisites a featured leaf needs but the platform-list
     # extraction drops, each stamping ``requires`` so the dashboard adds them
     # first with pins pre-filled: I/O-expander hubs referenced by a featured
@@ -2112,24 +2247,6 @@ def _make_record(  # noqa: C901, PLR0911, PLR0912 — distinct skip reasons each
     return record, None
 
 
-def _build_esphome_block(
-    soc: str,
-    board: str,
-    variant: str | None,
-    framework: str | None,
-    logger_hardware_uart: str | None = None,
-) -> dict[str, Any]:
-    """Compose the manifest's ``esphome:`` block, omitting empty optional fields."""
-    out: dict[str, Any] = {"platform": soc, "board": board}
-    if variant:
-        out["variant"] = variant
-    if framework in ("arduino", "esp-idf"):
-        out["framework"] = framework
-    if logger_hardware_uart:
-        out["logger_hardware_uart"] = logger_hardware_uart
-    return out
-
-
 # ESPHome's logger ``hardware_uart`` targets the manifest schema accepts.
 _LOGGER_HARDWARE_UARTS = frozenset({"UART0", "UART1", "UART2", "USB_CDC", "USB_SERIAL_JTAG"})
 
@@ -2144,15 +2261,6 @@ def _extract_logger_hardware_uart(config: dict[str, Any]) -> str | None:
         return None
     normalized = value.strip().upper()
     return normalized if normalized in _LOGGER_HARDWARE_UARTS else None
-
-
-def _connectivity_for(soc: str, variant: str | None) -> list[str] | None:
-    """Return the built-in radio mix for *soc*/*variant*, or ``None`` for none."""
-    if soc == "esp32":
-        # Variants without an explicit override fall through to the
-        # classic esp32 default (wifi + bluetooth).
-        return _ESP32_VARIANT_CONNECTIVITY.get(variant or "esp32", ["wifi", "bluetooth"])
-    return _SOC_CONNECTIVITY.get(soc)
 
 
 def _build_source_block(folder_name: str, revision: str, content_hash: str) -> dict[str, Any]:
@@ -2174,113 +2282,21 @@ def _build_source_block(folder_name: str, revision: str, content_hash: str) -> d
 # ---------------------------------------------------------------------------
 
 
-def _emit_manifest(record: dict[str, Any], src: _DeviceSource) -> Path | None:
-    """
-    Write ``boards/<id>/manifest.yaml``.
-
-    Skips with a warning when *target_dir* already holds a non-imported
-    manifest (slug collision with a hand-curated board). Images are
-    referenced as upstream raw URLs in the manifest itself (see
-    ``_build_record``); any pre-existing local ``images/`` subdir from
-    older syncs is removed so the wheel doesn't carry stale mirrors.
-    """
-    target_dir = _BOARDS_DIR / record["id"]
-    manifest_path = target_dir / "manifest.yaml"
-    prior = _read_manifest_dict(manifest_path)
-    # An existing manifest the sync doesn't own is a slug collision —
-    # leave it untouched. Hand-curated boards (no ``source.type``) and
-    # unparsable files both read as "not imported"; an unreadable file
-    # ``prior is None`` so guard on the file existing, not on the parse.
-    if manifest_path.is_file() and not _imported_remote_id(prior)[0]:
-        _LOGGER.warning(
-            "Skipping %s — slug collides with a hand-curated board (no source.type)",
-            record["id"],
-        )
-        return None
-    target_dir.mkdir(parents=True, exist_ok=True)
-
-    # Carry a hand-curated ``full_config`` opt-out/opt-in across re-imports —
-    # the importer never sets it (imports derive ``full_config`` from
-    # ``source.type``), so an override only survives if preserved here. Re-insert
-    # it right after ``esphome`` to keep manifest key order stable.
-    prior_full_config = prior.get("full_config") if prior is not None else None
-    if isinstance(prior_full_config, bool):
-        rebuilt: dict[str, Any] = {}
-        for key, value in record.items():
-            rebuilt[key] = value
-            if key == "esphome":
-                rebuilt["full_config"] = prior_full_config
-        record = rebuilt
-
-    images_dir = target_dir / "images"
-    if images_dir.is_dir():
-        shutil.rmtree(images_dir)
-
-    manifest_path.write_text(_dump_manifest(record), encoding="utf-8")
-    return target_dir
-
-
-def _read_manifest_dict(manifest_path: Path) -> dict[str, Any] | None:
-    """Parse an existing ``manifest.yaml`` to a dict, or ``None`` if missing/unreadable."""
-    if not manifest_path.is_file():
-        return None
-    try:
-        return load_manifest_dict(manifest_path)
-    except (OSError, ManifestError) as exc:
-        # A present-but-corrupt/unreadable manifest still returns None (the prior
-        # state is unrecoverable either way), but log it so it isn't silently
-        # indistinguishable from a manifest that never existed.
-        _LOGGER.warning("Ignoring unreadable manifest %s: %s", manifest_path, exc)
-        return None
-
-
-def _imported_remote_id(prior: dict[str, Any] | None) -> tuple[bool, str | None]:
-    """Return ``(is_imported, remote_id)`` for an already-parsed manifest dict."""
-    source = prior.get("source") if prior is not None else None
-    if not isinstance(source, dict) or source.get("type") != DEVICE_IMPORT_SOURCE_TYPE:
-        return False, None
-    remote_id = source.get("remote_id")
-    return True, remote_id if isinstance(remote_id, str) else None
-
-
-def _is_imported_manifest(manifest_path: Path) -> tuple[bool, str | None]:
-    """Return ``(is_imported, remote_id)`` for an existing board manifest."""
-    return _imported_remote_id(_read_manifest_dict(manifest_path))
+def _emit_manifest(record: dict[str, Any]) -> Path | None:
+    """Write ``boards/<id>/manifest.yaml`` under this sync's ownership rules."""
+    return emit_manifest(record, boards_dir=_BOARDS_DIR)
 
 
 def _prune_removed(active_remote_ids: set[str]) -> list[str]:
     """Delete boards/<id>/ for any imported manifest no longer upstream."""
-    removed: list[str] = []
-    if not _BOARDS_DIR.is_dir():
-        return removed
-    for child in sorted(_BOARDS_DIR.iterdir()):
-        if not child.is_dir():
-            continue
-        manifest = child / "manifest.yaml"
-        if not manifest.is_file():
-            continue
-        is_imported, remote_id = _is_imported_manifest(manifest)
-        if not is_imported:
-            continue
-        if remote_id and remote_id in active_remote_ids:
-            continue
-        shutil.rmtree(child)
-        removed.append(child.name)
-    return removed
+    return prune_removed(
+        active_remote_ids, source_type=DEVICE_IMPORT_SOURCE_TYPE, boards_dir=_BOARDS_DIR
+    )
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-
-
-def _load_components_index() -> dict[str, dict[str, Any]]:
-    """Join the slim component index with each per-id body, keyed by component id."""
-    if not _COMPONENTS_INDEX_JSON.is_file():
-        raise SystemExit(
-            f"{_COMPONENTS_INDEX_JSON} not found — run script/sync_components.py first."
-        )
-    return load_component_catalog(_COMPONENTS_INDEX_JSON, _COMPONENTS_BODIES_DIR)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -2339,6 +2355,44 @@ def main() -> int:
     report = _SyncReport()
     active_remote_ids: set[str] = set()
 
+    pending = _collect_records(repo, args, components_index, revision, report)
+
+    # Static extraction can't see everything ESPHome enforces (pin modes,
+    # cross-platform constraints, stale upstream pages) — validate every
+    # record's full setup for real and repair or refuse before emitting.
+    gate_skips = apply_validation_gate([record for _, record in pending], components_index)
+
+    for src, record in pending:
+        gate_reason = gate_skips.get(record["id"])
+        if gate_reason is not None:
+            report.skipped.append(_SkippedDevice(src.folder_name, gate_reason))
+            continue
+        if not args.dry_run and _emit_manifest(record) is None:
+            report.skipped.append(
+                _SkippedDevice(src.folder_name, "slug collides with hand-curated board")
+            )
+            continue
+        active_remote_ids.add(src.folder_name)
+        report.imported.append(record["id"])
+
+    # Pruning is dangerous when --limit / --device is in effect, since
+    # we haven't actually visited the rest of the upstream tree.
+    if not args.dry_run and args.limit is None and args.device is None:
+        report.removed = _prune_removed(active_remote_ids)
+
+    _print_report(report, args.verbose)
+    return 0
+
+
+def _collect_records(
+    repo: Path,
+    args: argparse.Namespace,
+    components_index: dict[str, dict[str, Any]],
+    revision: str,
+    report: _SyncReport,
+) -> list[tuple[_DeviceSource, dict[str, Any]]]:
+    """Build the record for every accepted upstream page, honoring the CLI filters."""
+    pending: list[tuple[_DeviceSource, dict[str, Any]]] = []
     for src in _iter_devices(repo):
         if args.device and src.folder_name != args.device:
             continue
@@ -2348,23 +2402,10 @@ def main() -> int:
             if args.verbose:
                 _LOGGER.debug("skip %s: %s", src.folder_name, skip_reason)
             continue
-        if not args.dry_run and _emit_manifest(record, src) is None:
-            report.skipped.append(
-                _SkippedDevice(src.folder_name, "slug collides with hand-curated board")
-            )
-            continue
-        active_remote_ids.add(src.folder_name)
-        report.imported.append(record["id"])
-        if args.limit is not None and len(report.imported) >= args.limit:
+        pending.append((src, record))
+        if args.limit is not None and len(pending) >= args.limit:
             break
-
-    # Pruning is dangerous when --limit / --device is in effect, since
-    # we haven't actually visited the rest of the upstream tree.
-    if not args.dry_run and args.limit is None and args.device is None:
-        report.removed = _prune_removed(active_remote_ids)
-
-    _print_report(report, args.verbose)
-    return 0
+    return pending
 
 
 def _print_report(report: _SyncReport, verbose: bool) -> None:

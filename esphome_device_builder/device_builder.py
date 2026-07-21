@@ -51,6 +51,7 @@ from .helpers.event_bus import Event, EventBus, StreamControls, stream_events
 from .helpers.json import cors_middleware, json_response
 from .helpers.network_interfaces import ensure_single_host_for_ephemeral_port, resolve_bind_host
 from .helpers.peer_link_identity import PeerLinkIdentityStore
+from .helpers.presence_gated_loop import PresenceGatedLoop
 from .helpers.secrets_state import write_secrets_locked
 from .helpers.startup_timing import StartupTimer
 from .helpers.subscriber_presence import SubscriberPresence
@@ -58,7 +59,7 @@ from .models import EventType
 
 _LOGGER = logging.getLogger(__name__)
 
-# How often ``_run_background`` re-runs ``DevicesController.poll``
+# How often ``_BackgroundPollLoop`` re-runs ``DevicesController.poll``
 # while at least one WS client is subscribed. Bounded above by how
 # stale a "user dropped a YAML in via SSH" change is allowed to look
 # in the dashboard's device list; bounded below by the cost of the
@@ -265,6 +266,7 @@ class DeviceBuilder:
         # Background tasks
         self._background_tasks: set[asyncio.Task] = set()
         self._bg_task: asyncio.Task | None = None
+        self._bg_poll: _BackgroundPollLoop | None = None
 
         # Latches the one-time network teardown so it can run early (in the
         # aiohttp ``on_shutdown`` hook) and stop() doesn't repeat it.
@@ -286,6 +288,23 @@ class DeviceBuilder:
     def is_remote_build_listener_bound(self) -> bool:
         """True iff the remote-build peer-link Noise WS listener is currently bound."""
         return self._remote_build_lifecycle.is_listener_bound
+
+    @property
+    def remote_build_listener_port(self) -> int | None:
+        """The bound peer-link port, or ``None`` while the listener is down."""
+        return self._remote_build_lifecycle.listener_port
+
+    @property
+    def remote_build_listener_host(self) -> str | None:
+        """The mDNS-advertised hostname peers dial, or ``None`` without an advertiser."""
+        advertiser = self._dashboard_advertiser
+        return advertiser.hostname if advertiser is not None else None
+
+    @property
+    def remote_build_listener_addresses(self) -> list[str]:
+        """The mDNS-advertised A/AAAA addresses; ``[]`` without a registered advertiser."""
+        advertiser = self._dashboard_advertiser
+        return advertiser.addresses if advertiser is not None else []
 
     async def apply_remote_build_enabled(self) -> bool:
         """Converge the peer-link listener to the on-disk ``enabled`` flag."""
@@ -405,6 +424,7 @@ class DeviceBuilder:
                 server_version=server_version,
                 esphome_version=esphome_version,
                 dashboard_id=dashboard_identity.dashboard_id,
+                on_ha_addon=self.settings.on_ha_addon,
             )
 
         await self.remote_build_receiver.start()
@@ -455,7 +475,8 @@ class DeviceBuilder:
             self.command_handlers["auth"] = self.command_handlers["auth/login"]
 
         # Start background polling
-        self._bg_task = create_eager_task(self._run_background())
+        self._bg_poll = _BackgroundPollLoop(self)
+        self._bg_task = create_eager_task(self._bg_poll.run())
 
         _LOGGER.info(
             "Device Builder ready — config dir: %s, %d commands registered",
@@ -490,6 +511,8 @@ class DeviceBuilder:
             return
         if self._bg_task:
             await drain_tasks((self._bg_task,), log_exceptions=True)
+        if self._bg_poll is not None:
+            self._bg_poll.unsubscribe()
         await drain_tasks(self._background_tasks)
         # Tear down the remote-build listener (if it was bound)
         # before the controller it depends on. Order matters less
@@ -555,40 +578,6 @@ class DeviceBuilder:
                 # safe and avoids the "what loop runs to_thread"
                 # question entirely.
                 executor.shutdown(wait=False)
-
-    async def _run_background(self) -> None:
-        """Background polling loop.
-
-        Drives ``DevicesController.poll`` for filesystem drift the
-        push paths can't see (YAML file dropped in via SSH /
-        Samba, atomic-save mid-edit, sidecar mtime change). Gated
-        on ``SubscriberPresence`` — when no WS client is
-        subscribed, no UI is showing the device list, so paying
-        for a directory enumeration + per-file stat every 5 s is
-        idle CPU we can skip. The 0→1 subscriber transition
-        wakes ``wait_for_subscriber`` immediately, so the first
-        client to connect picks up freshly-dropped YAMLs within
-        one ``_BACKGROUND_POLL_INTERVAL_SECONDS`` instead of
-        having to wait for the next scheduled tick — same shape
-        ``_ping_loop`` uses for the ICMP sweep.
-        """
-        presence = self.subscriber_presence
-        while True:
-            await presence.wait_for_subscriber()
-            if self.devices:
-                await self.devices.poll()
-            # Interruptible idle wait: bail early if the last
-            # subscriber leaves so the next one to connect doesn't
-            # sit through the rest of a stale interval. The
-            # ``TimeoutError`` branch is the steady-state "still
-            # subscribed, poll again" path; either way we loop
-            # back to ``wait_for_subscriber`` which parks if the
-            # gate has since closed.
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(
-                    presence.wait_for_no_subscribers(),
-                    timeout=_BACKGROUND_POLL_INTERVAL_SECONDS,
-                )
 
     @staticmethod
     async def _cmd_ping(**kwargs: Any) -> dict:
@@ -695,6 +684,11 @@ class DeviceBuilder:
                 initial["peers"] = [
                     summary.to_dict() for summary in self.remote_build_receiver.peers_snapshot()
                 ]
+                initial["remote_build_settings"] = self.remote_build_receiver.settings_snapshot()
+            if self.firmware is not None:
+                # Same rows follow_jobs would replay: created_at order,
+                # ``output`` dropped (fetched per-job via follow_job).
+                initial["firmware_jobs"] = self.firmware.jobs_snapshot()
             await client.send_event(message_id, "initial_state", initial)
             # Confirm subscription so the frontend can mark the WS
             # as live before the first event arrives.
@@ -1157,3 +1151,27 @@ class DeviceBuilder:
         app.router.add_get("/{tail:.*}", handle_spa)
 
         _LOGGER.info("Serving frontend from %s (dev_mode=%s)", frontend_dir, dev_mode)
+
+
+class _BackgroundPollLoop(PresenceGatedLoop[None]):
+    """
+    Poll ``DevicesController`` for filesystem drift the push paths can't see.
+
+    YAML dropped in via SSH / Samba, atomic-save mid-edit, sidecar
+    mtime changes. Gated on presence — with no WS client subscribed,
+    no UI is showing the device list, so the directory enumeration +
+    per-file stat every tick is idle CPU we can skip; the 0→1 wake
+    means the first client to connect picks up freshly-dropped YAMLs
+    within one interval.
+    """
+
+    _label = "Background device poll"
+    _interval = _BACKGROUND_POLL_INTERVAL_SECONDS
+
+    def __init__(self, builder: DeviceBuilder) -> None:
+        super().__init__(builder.subscriber_presence)
+        self._builder = builder
+
+    async def _work(self) -> None:
+        if self._builder.devices:
+            await self._builder.devices.poll()

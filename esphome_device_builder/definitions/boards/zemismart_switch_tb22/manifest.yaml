@@ -14,7 +14,7 @@ images:
 pins:
 - gpio: 0
   available: false
-  occupied_by: Backlight
+  occupied_by: Switch Living Backlight
 - gpio: 4
   available: false
   occupied_by: button3
@@ -23,13 +23,13 @@ pins:
   occupied_by: button2
 - gpio: 12
   available: false
-  occupied_by: relay2
+  occupied_by: Lamp 2
 - gpio: 13
   available: false
-  occupied_by: relay1
+  occupied_by: Lamp 1
 - gpio: 14
   available: false
-  occupied_by: relay3
+  occupied_by: Lamp 3
 - gpio: 16
   available: false
   occupied_by: button1
@@ -78,34 +78,37 @@ featured_components:
         inverted: true
       locked: true
     id: led_green
-    name: Backlight
+    name: Switch Living Backlight
 - id: relay1
   component_id: switch.gpio
   fields:
     pin:
       value: 13
       locked: true
+    restore_mode: ALWAYS_OFF
     id: relay1
-    name: relay1
+    name: Lamp 1
 - id: relay2
   component_id: switch.gpio
   fields:
     pin:
       value: 12
       locked: true
+    restore_mode: ALWAYS_OFF
     id: relay2
-    name: relay2
+    name: Lamp 2
 - id: relay3
   component_id: switch.gpio
   fields:
     pin:
       value: 14
       locked: true
+    restore_mode: ALWAYS_OFF
     id: relay3
-    name: relay3
+    name: Lamp 3
 source:
   type: esphome-devices
   remote_id: Zemismart-Switch-TB22
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Zemismart-Switch-TB22/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 9c1b80b7ea4fc117fcd8e6cbcc1e66481e479a1f9101adfd52caed825ef1abc5

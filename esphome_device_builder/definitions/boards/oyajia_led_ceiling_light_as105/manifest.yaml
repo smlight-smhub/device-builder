@@ -23,6 +23,8 @@ featured_components:
     cold_white_color_temperature: 6500 K
     warm_white_color_temperature: 2800 K
     constant_brightness: true
+    cold_white: output_cw
+    warm_white: output_ww
     id: white_light
     name: White Light
 - id: color_light
@@ -36,9 +38,30 @@ featured_components:
     rgb_order: GRB
     id: color_light
     name: Color Light
+- id: output_cw
+  component_id: output.libretiny_pwm
+  fields:
+    pin:
+      value: PWM1
+      locked: true
+    id: output_cw
+- id: output_ww
+  component_id: output.libretiny_pwm
+  fields:
+    pin:
+      value: PWM2
+      locked: true
+    id: output_ww
+featured_bundles:
+- id: white_light_setup
+  name: White Light (full setup)
+  component_ids:
+  - output_cw
+  - output_ww
+  - white_light
 source:
   type: esphome-devices
   remote_id: Oyajia-LED-Ceiling-light-AS105
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Oyajia-LED-Ceiling-light-AS105/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 1d2452f856bc69d6313d72dc6bf1407addcc7c5cd82a5f9c009abc0a8c8e915b

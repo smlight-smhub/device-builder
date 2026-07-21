@@ -63,12 +63,6 @@ featured_components:
     change_mode_every: 8
     update_interval: 5s
     id: sensor_hlw8012_1
-- id: sensor_total_daily_energy_1
-  component_id: sensor.total_daily_energy
-  fields:
-    unit_of_measurement: kWh
-    id: sensor_total_daily_energy_1
-    name: Kogan Plug 1 Daily Energy
 - id: green_led
   component_id: switch.gpio
   fields:
@@ -94,5 +88,5 @@ source:
   type: esphome-devices
   remote_id: Kogan-Smarterhome-Smart-Plug-With-Energy-Meter
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Kogan-Smarterhome-Smart-Plug-With-Energy-Meter/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 800caf139b0e7d41144822ba7c861e38e6661244ddc9afdd852b137adf2df383

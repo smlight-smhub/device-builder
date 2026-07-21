@@ -7,30 +7,19 @@ import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any, NoReturn
 
-try:
-    # ``friendly_name_slugify`` lives in ``esphome.helpers`` from
-    # esphome/esphome#16206 onwards. The fallback is for older
-    # esphome releases that still expose it from the dashboard
-    # package; once those drop the hard dependency goes away.
-    from esphome.helpers import friendly_name_slugify
-except ImportError:  # pragma: no cover; covered by the import below
-    from esphome.dashboard.util.text import friendly_name_slugify
-
-try:
-    from esphome.core.config import FRIENDLY_NAME_MAX_LEN
-except ImportError:  # pragma: no cover; older esphome without the constant
-    FRIENDLY_NAME_MAX_LEN = 120
-
-from esphome.helpers import sort_ip_addresses
+from esphome.core.config import FRIENDLY_NAME_MAX_LEN
+from esphome.helpers import friendly_name_slugify, sort_ip_addresses
 
 from ...helpers.api import CommandError
+from ...helpers.async_ import run_in_executor
+from ...helpers.atomic_io import atomic_write_exclusive
 from ...helpers.hostname import is_local_hostname, normalize_hostname
 from ...helpers.yaml import read_yaml_scalar, rewrite_name_or_substitution
 from ...models import ConfigEntryType, Device, ErrorCode
 from .constants import _CONCEALED_SECRET_RE
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from ...models import ComponentCatalogEntry, ConfigEntry
     from .._device_state_monitor import DeviceStateMonitor
@@ -56,10 +45,35 @@ __all__ = [
     "raise_device_not_found",
     "require_file_exists",
     "slugify_hostname",
+    "write_new_file_exclusive",
 ]
 
 
 _LOGGER = logging.getLogger(__name__)
+
+
+async def write_new_file_exclusive(
+    path: Path, content: str, *, on_exists: Callable[[BaseException], NoReturn]
+) -> None:
+    """
+    Exclusive-create *content* at *path* off the event loop; staged, atomic.
+
+    The exclusive publish refuses to clobber an existing file with no
+    TOCTOU window, and the staging means a crash mid-write leaves no
+    partial target (except on a hardlink-less mount, where
+    :func:`helpers.atomic_io.atomic_write_exclusive` degrades to a
+    direct exclusive write). A ``FileExistsError`` is delegated to
+    *on_exists*, which raises the caller's typed error.
+    """
+
+    def _write() -> None:
+        atomic_write_exclusive(path, content.encode("utf-8"))
+
+    try:
+        await run_in_executor(_write)
+    except FileExistsError as exc:
+        on_exists(exc)
+        raise
 
 
 def raise_device_not_found(
@@ -438,9 +452,9 @@ def _build_address_cache_args(device: Device, monitor: DeviceStateMonitor | None
     addresses: list[str] = []
     if monitor is not None:
         cached = (
-            monitor.get_cached_addresses(address)
+            monitor.mdns.get_cached_addresses(address)
             if is_local
-            else monitor.get_cached_dns_addresses(address)
+            else monitor.state.dns_cache.get_cached_addresses(address)
         )
         if cached:
             addresses = list(cached)

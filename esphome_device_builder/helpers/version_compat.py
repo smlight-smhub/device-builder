@@ -52,13 +52,46 @@ _RELEASE_RE = re.compile(r"\d+(?:\.\d+)*")
 
 
 def is_release_version(version: str) -> bool:
-    """Return whether *version* is a final release, not a pre / dev / local build.
-
-    Stricter than :func:`is_pep440_version`: only a plain release pins to a
-    reproducible ``pip install esphome==<version>``, so the provisioner
-    refuses anything else (a ``-dev`` build can't be pinned to an exact commit).
-    """
+    """Return whether *version* is a final release, not a pre / dev / local build."""
     return _RELEASE_RE.fullmatch(version) is not None
+
+
+_PINNABLE_RE = re.compile(r"\d+(?:\.\d+)*(?:(?:a|b|rc)\d+)?")
+
+
+def is_pinnable_version(version: str) -> bool:
+    """Return whether *version* is a plain release or an a/b/rc pre-release.
+
+    Exactly the shapes PyPI publishes for esphome, so they pin to a
+    reproducible ``pip install esphome==<v>``; dev / post / local /
+    epoch forms are refused.
+    """
+    return _PINNABLE_RE.fullmatch(version) is not None
+
+
+_PINNABLE_KEY_RE = re.compile(r"(\d+(?:\.\d+)*)(?:(a|b|rc)(\d+))?")
+_PRE_ORDER = {"a": 0, "b": 1, "rc": 2}
+
+
+def pinnable_version_key(version: str) -> tuple[tuple[int, ...], int, int, int]:
+    """
+    Sort key for a pinnable version.
+
+    Trailing ``.0`` release parts are normalised out (``2026.6`` orders
+    equal to ``2026.6.0``) and a pre-release orders before its final
+    (``2026.7.0b3 < 2026.7.0``). Raises ``ValueError`` for a version
+    :func:`is_pinnable_version` rejects.
+    """
+    match = _PINNABLE_KEY_RE.fullmatch(version)
+    if match is None:
+        msg = f"not a pinnable version: {version!r}"
+        raise ValueError(msg)
+    parts = [int(part) for part in match.group(1).split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    if match.group(2) is None:
+        return (tuple(parts), 1, 0, 0)
+    return (tuple(parts), 0, _PRE_ORDER[match.group(2)], int(match.group(3)))
 
 
 class VersionMatchPolicy(StrEnum):

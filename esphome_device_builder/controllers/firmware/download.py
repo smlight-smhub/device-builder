@@ -22,11 +22,13 @@ from ...definitions import (
 )
 from ...helpers.api import CommandError
 from ...helpers.async_ import run_in_executor
+from ...helpers.build_artifacts import resolve_elf_path
 from ...helpers.json import JSONDecodeError
 from ...helpers.json import loads as json_loads
+from ...helpers.paths import resolve_under_root
 from ...helpers.storage_path import resolve_storage_path
 from ...models.boards import normalize_platform
-from .helpers import _find_sibling_cli
+from .helpers import helper_cli_cmd
 
 if TYPE_CHECKING:
     from .controller import FirmwareController
@@ -72,7 +74,7 @@ _platform_sets()
 
 def _helper_cmd() -> tuple[str, ...]:
     """Argv prefix for the device-builder-helper child (cached by _find_sibling_cli)."""
-    return _find_sibling_cli("device-builder-helper", "esphome_device_builder.helper_cli")
+    return helper_cli_cmd()
 
 
 # Stable ``type`` tag per artifact filename so the frontend can map it to a
@@ -138,12 +140,10 @@ def collect_download_entries(
     # Filter to files that exist so a cleaned build reads as "compile
     # first" rather than offering a name ``firmware/download`` would 404 on.
     downloads = [dict(t) for t in types if (build_dir / t["file"]).is_file()]
-    # firmware.elf sits beside firmware.bin on every platform
-    # (remote_build/artifact_platforms/*.py). The `not any` guards against a
-    # future get_download_types that lists it, so it can't appear twice.
-    if (build_dir / "firmware.elf").is_file() and not any(
-        t["file"] == "firmware.elf" for t in downloads
-    ):
+    # The `not any` guards against a future get_download_types that lists the
+    # ELF, so it can't appear twice.
+    elf = resolve_elf_path(storage)
+    if elf and elf.is_file() and not any(t["file"] == "firmware.elf" for t in downloads):
         downloads.append(
             {
                 "title": "ELF (for debugging)",
@@ -229,7 +229,7 @@ def _resolve_artifact_path(configuration: str, file: str) -> tuple[Path, str]:
     """Resolve a build artifact to ``(path, download_name)``, traversal-safe.
 
     Raises ``FileNotFoundError`` when the device isn't built or *file* is
-    absent, and ``ValueError`` (from ``relative_to``) when *file* escapes the
+    absent, and ``PathEscapeError`` (a ``ValueError``) when *file* escapes the
     build directory. ``download_name`` is restricted to a filename-safe charset
     so it can't inject into a ``Content-Disposition`` header.
     """
@@ -239,10 +239,7 @@ def _resolve_artifact_path(configuration: str, file: str) -> tuple[Path, str]:
         raise FileNotFoundError(msg)
 
     base_dir = storage.firmware_bin_path.parent.resolve()
-    path = (base_dir / file).resolve()
-    # Path traversal protection — resolve() collapses ``..`` / absolute
-    # ``file`` / symlinks, then relative_to raises if it escaped base_dir.
-    path.relative_to(base_dir)
+    path = resolve_under_root(base_dir / file, base_dir)
 
     if not path.is_file():
         msg = f"Binary not found: {file}"

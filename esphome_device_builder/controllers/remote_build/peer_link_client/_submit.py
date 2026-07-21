@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from ....helpers.peer_link_bundle import (
@@ -14,12 +15,15 @@ from ....helpers.peer_link_bundle import (
 from ....models import (
     CancelJobFrameData,
     DownloadArtifactsFrameData,
+    ResetBuildEnvAckFrameData,
+    ResetBuildEnvFrameData,
     SubmitJobAckFrameData,
     SubmitJobChunkFrameData,
     SubmitJobFrameData,
 )
 from .._client_models import (
     DownloadArtifactsResult,
+    DuplicateRequestError,
     PeerLinkNoSessionError,
     SubmitJobSessionLostError,
     SubmitJobTimeoutError,
@@ -43,7 +47,7 @@ async def submit_job(
     *,
     job_id: str,
     configuration_filename: str,
-    target: Literal["compile", "upload", "clean"],
+    target: Literal["compile", "clean"],
     bundle_bytes: bytes,
     device_name: str = "",
     device_friendly_name: str = "",
@@ -52,13 +56,18 @@ async def submit_job(
     """
     Send a ``submit_job`` header + chunked bundle and await the receiver's ack.
 
-    Same-``job_id`` reentry mid-flow raises :class:`PeerLinkNoSessionError`;
+    Same-``job_id`` reentry mid-flow raises :class:`DuplicateRequestError`;
     the WS layer should generate a fresh id per submit. Callers must not
     retry on timeout / session-loss: the receiver may have queued the job
     already.
     """
     channel = _require_open_channel(client, label="submit_job")
-    ack_fut = _register_submit_job_ack_future(client, job_id)
+    ack_fut = _register_pending(
+        client._submit_job_acks,
+        job_id,
+        asyncio.get_running_loop().create_future,
+        label="submit_job",
+    )
     try:
         await _send_submit_job_frames(
             client,
@@ -71,9 +80,35 @@ async def submit_job(
             device_friendly_name=device_friendly_name,
             target_esphome_version=target_esphome_version,
         )
-        return await _await_submit_job_ack(client, ack_fut, job_id=job_id)
+        return await _await_ack(client, ack_fut, job_id=job_id, label="submit_job")
     finally:
         client._submit_job_acks.pop(job_id, None)
+
+
+async def reset_build_env(client: PeerLinkClient, *, job_id: str) -> ResetBuildEnvAckFrameData:
+    """
+    Send a ``reset_build_env`` frame and await the receiver's enqueue ack.
+
+    *job_id* is the offloader-side mirror job's id; the receiver echoes it
+    on the ack and every fan-out frame of its reset job.
+    """
+    channel = _require_open_channel(client, label="reset_build_env")
+    ack_fut = _register_pending(
+        client._reset_env_acks,
+        job_id,
+        asyncio.get_running_loop().create_future,
+        label="reset_build_env",
+    )
+    frame: ResetBuildEnvFrameData = {"type": "reset_build_env", "job_id": job_id}
+    try:
+        if not await channel.send_frame(cast(dict[str, Any], frame)):
+            raise SubmitJobSessionLostError(
+                f"reset_build_env: request send failed mid-flow to "
+                f"{client._hostname}:{client._port}"
+            )
+        return await _await_ack(client, ack_fut, job_id=job_id, label="reset_build_env")
+    finally:
+        client._reset_env_acks.pop(job_id, None)
 
 
 async def cancel_job(client: PeerLinkClient, *, job_id: str) -> bool:
@@ -97,19 +132,17 @@ async def download_artifacts(client: PeerLinkClient, *, job_id: str) -> Download
     carries the bootloader / partition / ota_data offsets via
     ``idedata.json``).
 
-    Same-``job_id`` reentry raises :class:`PeerLinkNoSessionError`.
+    Same-``job_id`` reentry raises :class:`DuplicateRequestError`.
     Receiver-reported failures surface as :class:`DownloadArtifactsError`;
     session loss mid-download as :class:`SubmitJobSessionLostError`.
     """
     channel = _require_open_channel(client, label="download_artifacts")
-    if job_id in client._artifacts_downloads:
-        msg = (
-            f"download_artifacts: future already registered for job_id={job_id!r} "
-            f"(duplicate download on the same session)"
-        )
-        raise PeerLinkNoSessionError(msg)
-    result: asyncio.Future[DownloadArtifactsResult] = asyncio.get_running_loop().create_future()
-    client._artifacts_downloads[job_id] = _DownloadArtifactsState(future=result)
+    state = _register_pending(
+        client._artifacts_downloads,
+        job_id,
+        lambda: _DownloadArtifactsState(future=asyncio.get_running_loop().create_future()),
+        label="download_artifacts",
+    )
     try:
         frame: DownloadArtifactsFrameData = {
             "type": "download_artifacts",
@@ -120,7 +153,7 @@ async def download_artifacts(client: PeerLinkClient, *, job_id: str) -> Download
                 f"download_artifacts: request send failed mid-flow to "
                 f"{client._hostname}:{client._port}"
             )
-        return await result
+        return await state.future
     finally:
         client._artifacts_downloads.pop(job_id, None)
 
@@ -134,21 +167,20 @@ def _require_open_channel(client: PeerLinkClient, *, label: str) -> PeerLinkChan
     return channel
 
 
-def _register_submit_job_ack_future(
-    client: PeerLinkClient, job_id: str
-) -> asyncio.Future[SubmitJobAckFrameData]:
-    """Allocate + register the per-``job_id`` ack future, refusing duplicates."""
-    if job_id in client._submit_job_acks:
+def _register_pending[EntryT](
+    pending: dict[str, EntryT], job_id: str, make_entry: Callable[[], EntryT], *, label: str
+) -> EntryT:
+    """Build + register the per-``job_id`` in-flight entry in *pending*, refusing duplicates."""
+    if job_id in pending:
         msg = (
-            f"submit_job: ack future already registered for job_id={job_id!r} "
-            f"(duplicate submit on the same session)"
+            f"{label}: request already registered for job_id={job_id!r} "
+            f"(duplicate {label} on the same session)"
         )
-        raise PeerLinkNoSessionError(msg)
-    # Register BEFORE the header goes out so a same-tick ack from the
+        raise DuplicateRequestError(msg)
+    # Register BEFORE the request goes out so a same-tick reply from the
     # receive loop can't beat the registration into the map.
-    ack_fut: asyncio.Future[SubmitJobAckFrameData] = asyncio.get_running_loop().create_future()
-    client._submit_job_acks[job_id] = ack_fut
-    return ack_fut
+    entry = pending[job_id] = make_entry()
+    return entry
 
 
 async def _send_submit_job_frames(
@@ -157,7 +189,7 @@ async def _send_submit_job_frames(
     *,
     job_id: str,
     configuration_filename: str,
-    target: Literal["compile", "upload", "clean"],
+    target: Literal["compile", "clean"],
     bundle_bytes: bytes,
     device_name: str = "",
     device_friendly_name: str = "",
@@ -205,18 +237,19 @@ async def _send_submit_job_frames(
             )
 
 
-async def _await_submit_job_ack(
+async def _await_ack[AckT](
     client: PeerLinkClient,
-    ack_fut: asyncio.Future[SubmitJobAckFrameData],
+    ack_fut: asyncio.Future[AckT],
     *,
     job_id: str,
-) -> SubmitJobAckFrameData:
+    label: str,
+) -> AckT:
     """Park on *ack_fut* with a bounded timeout; raise structured errors."""
     try:
         return await asyncio.wait_for(ack_fut, timeout=_SUBMIT_JOB_ACK_TIMEOUT_SECONDS)
     except TimeoutError as exc:
         raise SubmitJobTimeoutError(
-            f"submit_job: no ack from {client._hostname}:{client._port} "
+            f"{label}: no ack from {client._hostname}:{client._port} "
             f"after {_SUBMIT_JOB_ACK_TIMEOUT_SECONDS:.0f}s "
             f"(job_id={job_id!r})"
         ) from exc

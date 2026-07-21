@@ -16,44 +16,39 @@ images:
 - https://raw.githubusercontent.com/esphome/devices.esphome.io/main/src/docs/devices/Gelidus-Research-Energy-Collector-1/grec1.j2.circuit.jpg
 - https://raw.githubusercontent.com/esphome/devices.esphome.io/main/src/docs/devices/Gelidus-Research-Energy-Collector-1/photo.sens.1m.jpg
 - https://raw.githubusercontent.com/esphome/devices.esphome.io/main/src/docs/devices/Gelidus-Research-Energy-Collector-1/grec1.j2.connection.pins.jpg
+pins:
+- gpio: 25
+  available: false
+  occupied_by: digi_pot_voltage
 docs_url: https://devices.esphome.io/devices/Gelidus-Research-Energy-Collector-1/
 featured_components:
-- id: sensor_energy_pulse_meter
-  component_id: sensor.pulse_meter
+- id: homeassistant_time
+  component_id: time.homeassistant
   fields:
-    unit_of_measurement: W
-    state_class: measurement
-    device_class: power
-    icon: mdi:flash-outline
-    accuracy_decimals: 0
-    id: sensor_energy_pulse_meter
-    name: Power Consumption
-- id: sensor_total_daily_energy
-  component_id: sensor.total_daily_energy
+    id:
+      value: homeassistant_time
+      locked: true
+- id: digi_pot_voltage
+  component_id: output.esp32_dac
   fields:
-    unit_of_measurement: kWh
-    icon: mdi:circle-slice-3
-    state_class: total_increasing
-    device_class: energy
-    accuracy_decimals: 3
-    power_id: sensor_energy_pulse_meter
-    id: sensor_total_daily_energy
-    name: Daily Energy
+    pin:
+      value: 25
+      locked: true
+    id: digi_pot_voltage
 - id: sensor_wifi_signal_1
   component_id: sensor.wifi_signal
   fields:
     update_interval: 120s
     id: sensor_wifi_signal_1
-    name: WiFi Signal
+    name: GREC1 - WiFi Signal
 featured_bundles:
 - id: sensor_total_daily_energy_setup
-  name: Daily Energy (full setup)
+  name: GREC1 - Daily Energy (full setup)
   component_ids:
-  - sensor_energy_pulse_meter
-  - sensor_total_daily_energy
+  - homeassistant_time
 source:
   type: esphome-devices
   remote_id: Gelidus-Research-Energy-Collector-1
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Gelidus-Research-Energy-Collector-1/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: e8d0e2c5e20b53f76cfb982206f0e62a2c7d6f1c2afeda0051ac8c0b7c84c5b8

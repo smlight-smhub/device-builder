@@ -13,11 +13,13 @@ from __future__ import annotations
 import asyncio
 import gzip
 import io
+import stat
+import sys
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import esphome.config_validation as cv
 import pytest
@@ -38,7 +40,12 @@ from esphome_device_builder.controllers.devices.mutations_yaml import (
 )
 from esphome_device_builder.helpers.api import CommandError
 from esphome_device_builder.helpers.yaml import _safe_yaml_scalar
-from esphome_device_builder.models import ComponentCatalogEntry, ComponentCategory, ErrorCode
+from esphome_device_builder.models import (
+    ComponentCatalogEntry,
+    ComponentCategory,
+    Connectivity,
+    ErrorCode,
+)
 
 from .conftest import MakeControllerFactory, StubBoardLookups
 
@@ -318,6 +325,7 @@ async def test_yaml_content_for_create_refuses_no_wifi_on_wifi_only_board(
         hardware=SimpleNamespace(connectivity=[SimpleNamespace(value="wifi")]),
         featured_components=[],
         default_components=[],
+        package_import_url="",
     )
     assert not (tmp_path / "secrets.yaml").exists()
     with pytest.raises(CommandError) as excinfo:
@@ -667,6 +675,7 @@ async def test_create_device_template_invalid_yaml_surfaces_internal_error(
     (tmp_path / "secrets.yaml").write_text('wifi_ssid: "x"\nwifi_password: "y"\n', encoding="utf-8")
     # Board returns a valid catalog entry that drives ``generate_device_yaml``.
     board = MagicMock()
+    board.package_import_url = ""
     board.id = "esp32-c3"
     board.esphome.platform = "esp32"
     board.esphome.variant = "esp32c3"
@@ -697,6 +706,70 @@ async def test_create_device_template_invalid_yaml_surfaces_internal_error(
     assert "report" in excinfo.value.message.lower()
     assert not (tmp_path / "kitchen.yaml").exists()
     assert ctrl._scanner.calls == []
+
+
+def _package_board() -> MagicMock:
+    """Board stub for a remote-package (bluetooth-proxies) catalog entry."""
+    board = MagicMock()
+    board.id = "olimex-esp32-poe-iso-bluetooth-proxy"
+    board.name = "Olimex ESP32-POE-ISO Bluetooth Proxy"
+    board.manufacturer = "OLIMEX"
+    board.package_import_url = (
+        "github://esphome/bluetooth-proxies/olimex/olimex-esp32-poe-iso.yaml@main"
+    )
+    board.package_name = "esphome.bluetooth-proxy"
+    board.featured_components = []
+    board.default_components = []
+    board.hardware.connectivity = [Connectivity.ETHERNET]
+    return board
+
+
+async def test_create_device_package_board_writes_package_yaml(
+    tmp_path: Path, make_controller: MakeControllerFactory
+) -> None:
+    """A package board create lands the ``packages:`` shape, validated tolerantly.
+
+    The generated YAML only validates through a live upstream fetch, so
+    the create must use the adoption contract — unavailability tolerated
+    with a short budget — rather than the strict template policy.
+    """
+    ctrl = make_controller(tmp_path, with_state_monitor=True, with_boards=True)
+    ctrl._db.boards.get_board = AsyncMock(return_value=_package_board())
+    ctrl._db.editor.validate_yaml = AsyncMock(side_effect=TimeoutError)
+
+    await ctrl.create_device(name="proxy", board_id="olimex-esp32-poe-iso-bluetooth-proxy")
+
+    content = (tmp_path / "proxy.yaml").read_text(encoding="utf-8")
+    assert "packages:" in content
+    assert "github://esphome/bluetooth-proxies/olimex/olimex-esp32-poe-iso.yaml@main" in content
+    # The wired package provides the network, so no local wifi block lands.
+    assert "wifi:" not in content
+    # Tolerant validation: the timed-out upstream fetch kept the file.
+    ctrl._db.editor.validate_yaml.assert_awaited_once()
+
+
+async def test_create_device_wifi_package_board_persists_secrets(
+    tmp_path: Path, make_controller: MakeControllerFactory
+) -> None:
+    """Wizard Wi-Fi creds for a Wi-Fi package board land in secrets.yaml, not the YAML."""
+    ctrl = make_controller(tmp_path, with_state_monitor=True, with_boards=True)
+    board = _package_board()
+    board.hardware.connectivity = [Connectivity.WIFI]
+    ctrl._db.boards.get_board = AsyncMock(return_value=board)
+    ctrl._db.editor.validate_yaml = AsyncMock(
+        return_value={"yaml_errors": [], "validation_errors": []}
+    )
+
+    await ctrl.create_device(name="proxy", board_id=board.id, ssid="MyNetwork", psk="hunter2")
+
+    content = (tmp_path / "proxy.yaml").read_text(encoding="utf-8")
+    assert "packages:" in content
+    assert "  ssid: !secret wifi_ssid\n" in content
+    assert "  password: !secret wifi_password\n" in content
+    assert "MyNetwork" not in content
+    secrets = (tmp_path / "secrets.yaml").read_text(encoding="utf-8")
+    assert 'wifi_ssid: "MyNetwork"' in secrets
+    assert 'wifi_password: "hunter2"' in secrets
 
 
 async def test_create_device_clears_residual_metadata_from_archived_same_name(
@@ -758,12 +831,14 @@ async def test_create_device_write_race_surfaces_already_exists(
 ) -> None:
     """A file appearing between the pre-check and the exclusive write maps to ALREADY_EXISTS."""
     ctrl = make_controller(tmp_path, with_state_monitor=True, with_boards=True)
-    fake = MagicMock()
-    fake.exists.return_value = False  # pre-check passes
-    fake.open.side_effect = FileExistsError  # the exclusive write loses the race
-    ctrl._db.settings.rel_path = lambda _filename: fake
 
-    with pytest.raises(CommandError) as excinfo:
+    with (
+        patch(
+            "esphome_device_builder.controllers.devices.helpers.atomic_write_exclusive",
+            side_effect=FileExistsError("kitchen.yaml"),  # the exclusive write loses the race
+        ),
+        pytest.raises(CommandError) as excinfo,
+    ):
         await ctrl.create_device(name="kitchen", file_content=VALID_FILE_CONTENT)
 
     assert excinfo.value.code == ErrorCode.ALREADY_EXISTS
@@ -798,6 +873,23 @@ async def test_create_device_overwrite_preserves_metadata(
     assert post.get("comment") == "my note"
     assert post.get("board_id") == "esp32-pick"
     assert ctrl._scanner.calls == [("scan",)]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows doesn't honor POSIX mode bits")
+async def test_create_device_overwrite_preserves_operator_mode(
+    tmp_path: Path, make_controller: MakeControllerFactory
+) -> None:
+    """A confirmed overwrite keeps the existing YAML's tightened mode."""
+    target = tmp_path / "kitchen.yaml"
+    target.write_text("esphome:\n  name: kitchen\n", "utf-8")
+    target.chmod(0o600)
+    ctrl = make_controller(tmp_path, with_state_monitor=True, with_boards=True)
+    new_content = "esphome:\n  name: kitchen\n  friendly_name: New\n"
+
+    await ctrl.create_device(name="kitchen", file_content=new_content, overwrite=True)
+
+    assert target.read_text("utf-8") == new_content
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
 
 async def test_create_device_with_board_id_overwrites_archived_board_id(
@@ -835,6 +927,7 @@ async def test_create_device_with_board_id_overwrites_archived_board_id(
     )
     # Catalog returns a usable board for the new id.
     new_board = MagicMock()
+    new_board.package_import_url = ""
     new_board.id = "rp2040-new-board"
     new_board.esphome.platform = "rp2040"
     new_board.template = None
@@ -1005,6 +1098,7 @@ async def test_yaml_content_for_create_skips_network_pull_when_default_already_n
     skipped so ``merge_component_yaml`` never emits the block twice.
     """
     board = MagicMock()
+    board.package_import_url = ""
     board.id = "wired-board"
     board.name = "Wired Board"
     board.manufacturer = ""

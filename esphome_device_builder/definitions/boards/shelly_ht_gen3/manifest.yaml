@@ -16,9 +16,6 @@ images:
 tags:
 - shelly
 pins:
-- gpio: 0
-  available: false
-  occupied_by: Button
 - gpio: 1
   available: false
   occupied_by: i2c
@@ -58,20 +55,6 @@ featured_components:
     internal: true
     id: batt_presence
     name: batt_presence
-- id: binary_sensor_gpio_2
-  component_id: binary_sensor.gpio
-  fields:
-    pin:
-      value:
-        number: 0
-        mode:
-          input: true
-          pullup: true
-        inverted: true
-        allow_other_uses: true
-      locked: true
-    id: binary_sensor_gpio_2
-    name: Button
 - id: batt_power_en
   component_id: output.gpio
   fields:
@@ -109,5 +92,5 @@ source:
   type: esphome-devices
   remote_id: Shelly-HT-Gen3
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Shelly-HT-Gen3/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 8030ca40273ce51659f2fb8f2df3311022b7d2f5b5da3d64ac54133f89da5291

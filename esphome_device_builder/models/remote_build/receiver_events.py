@@ -21,6 +21,23 @@ class RemoteBuildIdentityRotatedData(TypedDict):
     pin_sha256: str
 
 
+class RemoteBuildListenerChangedData(TypedDict):
+    """
+    Payload for ``EventType.REMOTE_BUILD_LISTENER_CHANGED``.
+
+    Fires when the peer-link listener binds or tears down, carrying
+    the mDNS-advertised pairing address so subscribers can render it
+    without re-reading ``get_identity``. ``listener_port`` is ``None``
+    while the listener is down; ``listener_host`` is ``None`` without
+    an attached advertiser (zeroconf unavailable) and
+    ``listener_addresses`` ``[]`` until it registers.
+    """
+
+    listener_host: str | None
+    listener_addresses: list[str]
+    listener_port: int | None
+
+
 class RemoteBuildPairRequestReceivedData(TypedDict):
     """
     Payload for ``EventType.REMOTE_BUILD_PAIR_REQUEST_RECEIVED``.
@@ -38,6 +55,9 @@ class RemoteBuildPairRequestReceivedData(TypedDict):
     label: str
     peer_ip: str
     paired_at: float
+    friendly_name: str
+    ha_addon: bool
+    label_auto: bool
 
 
 class RemoteBuildPairStatusChangedData(TypedDict):
@@ -78,10 +98,15 @@ class ReceiverPeerLinkSessionOpenedData(TypedDict):
     :meth:`ReceiverController.register_peer_link_session` once
     the post-handshake dispatch loop is parked. ``dashboard_id``
     is the offloader's stable identity captured from the Noise
-    XX handshake transcript.
+    XX handshake transcript. ``friendly_name`` / ``ha_addon``
+    are the offloader's display identity after the session-open
+    refresh (the stored row's values, so an old offloader that
+    sent nothing surfaces whatever pair time captured).
     """
 
     dashboard_id: str
+    friendly_name: str
+    ha_addon: bool
 
 
 class ReceiverPeerLinkSessionClosedData(TypedDict):

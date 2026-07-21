@@ -1,8 +1,9 @@
 name: Sync device catalog
 
-# Re-runs ``script/sync_esphome_devices.py`` against the
-# devices.esphome.io upstream and opens a pull request when imported
-# manifests under ``definitions/boards/`` change. Introspects against
+# Re-runs ``script/sync_esphome_devices.py`` (devices.esphome.io) and
+# ``script/sync_bluetooth_proxies.py`` (esphome/bluetooth-proxies) and
+# opens a pull request when imported manifests under
+# ``definitions/boards/`` change. Introspects against
 # the pinned esphome (``esphome-constraints.txt``), the same version CI
 # and the committed catalog use: ``sync_boards.py`` re-stamps
 # boards.index.json from the installed esphome, so a newer prerelease
@@ -46,17 +47,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+      - name: Set up uv and Python 3.14
+        uses: ./.github/actions/setup-uv-python
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
-      - name: Set up uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
-        with:
-          enable-cache: true
-
-      - name: Install package (with esphome extra)
+      - name: Create venv + install package (with esphome extra)
         # ``sync_boards.py`` introspects ESPHome's per-platform board
         # modules to regenerate board pins, so the esphome extra is
         # required; ``test`` carries jsonschema for validate_definitions.
@@ -66,7 +62,10 @@ jobs:
         # newer prerelease here would commit a stamp the Test job's pinned
         # lint can't match. The catalog advances to a new esphome as one
         # unit when the component sync bumps the pin on release.
-        run: uv pip install --system -c esphome-constraints.txt -e '.[esphome,test]'
+        run: |
+          uv venv
+          uv pip install -c esphome-constraints.txt -e '.[esphome,test]'
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Run sync_esphome_devices
         run: python script/sync_esphome_devices.py
@@ -78,6 +77,12 @@ jobs:
         # proposed for merge.
         run: python script/check_device_catalog.py
 
+      - name: Run sync_bluetooth_proxies
+        run: python script/sync_bluetooth_proxies.py
+
+      - name: Smoke-test imported bluetooth proxies
+        run: python script/check_bluetooth_proxy_catalog.py
+
       - name: Validate definitions
         # Re-validates every board (curated + imported) against the
         # JSON Schema and the component catalog cross-references.
@@ -86,7 +91,9 @@ jobs:
       - name: Regenerate board catalog
         # The opened PR needs to ship the regenerated catalog
         # alongside the imported manifests — without this, a merge
-        # would land new YAMLs the dashboard never sees.
+        # would land new YAMLs the dashboard never sees. No --restamp:
+        # the pinned install above matches the committed stamp, so the
+        # full-sync guard doubles as a pin/stamp consistency check.
         run: python script/sync_boards.py
 
       - name: Detect device-catalog changes + summarise diff
@@ -115,7 +122,10 @@ jobs:
 
           import yaml
 
+          from esphome_device_builder.constants import IMPORT_SOURCE_TYPES
+
           BOARDS = Path("esphome_device_builder/definitions/boards")
+          IMPORT_TYPES = tuple(sorted(IMPORT_SOURCE_TYPES))
 
           def load_imported_now() -> dict[str, dict]:
               out: dict[str, dict] = {}
@@ -129,7 +139,7 @@ jobs:
                   if not isinstance(data, dict):
                       continue
                   source = data.get("source")
-                  if not isinstance(source, dict) or source.get("type") != "esphome-devices":
+                  if not isinstance(source, dict) or source.get("type") not in IMPORT_TYPES:
                       continue
                   out[child.name] = data
               return out
@@ -159,7 +169,7 @@ jobs:
                   if not isinstance(data, dict):
                       continue
                   source = data.get("source")
-                  if not isinstance(source, dict) or source.get("type") != "esphome-devices":
+                  if not isinstance(source, dict) or source.get("type") not in IMPORT_TYPES:
                       continue
                   # The folder name is the second-to-last segment.
                   folder = Path(line).parent.name
@@ -182,13 +192,27 @@ jobs:
                   counter[platform] += 1
               return counter
 
+          def source_counts(snapshot: dict[str, dict]) -> Counter:
+              counter: Counter[str] = Counter()
+              for board in snapshot.values():
+                  counter[board["source"]["type"]] += 1
+              return counter
+
           old_fam = family_counts(old)
           new_fam = family_counts(new)
           all_fam = sorted(set(old_fam) | set(new_fam))
 
+          old_src = source_counts(old)
+          new_src = source_counts(new)
+          per_source = " · ".join(
+              f"`{src}` {old_src.get(src, 0)} → {new_src.get(src, 0)}"
+              for src in IMPORT_TYPES
+              if old_src.get(src, 0) or new_src.get(src, 0)
+          )
           lines = [
               f"**Imported boards**: {len(old)} → {len(new)} ({len(new) - len(old):+d})  ",
-              f"**Added**: {len(added)} · **Removed**: {len(removed)}",
+              f"**Added**: {len(added)} · **Removed**: {len(removed)}  ",
+              per_source,
               "",
           ]
 
@@ -236,24 +260,24 @@ jobs:
           branch: catalog/sync-devices
           base: main
           commit-message: |
-            Sync device catalog from devices.esphome.io
+            Sync device catalog from upstream sources
 
             Auto-generated by .github/workflows/sync-device-catalog.yml.
-          title: "Sync device catalog from devices.esphome.io"
+          title: "Sync device catalog from upstream sources"
           body: |
-            Automated catalog refresh from [`esphome/devices.esphome.io`](https://github.com/esphome/devices.esphome.io).
+            Automated catalog refresh from [`esphome/devices.esphome.io`](https://github.com/esphome/devices.esphome.io) and [`esphome/bluetooth-proxies`](https://github.com/esphome/bluetooth-proxies).
 
             Triggered by: **${{ github.event_name == 'schedule' && 'weekly schedule' || format('manual dispatch by @{0}', github.actor) }}**.
 
             ${{ steps.diff.outputs.summary }}
 
-            **Smoke test:** ✅ passes [`script/check_device_catalog.py`](../blob/main/script/check_device_catalog.py) — known well-formed pages still extract with the expected board, variant, and featured-component shape.
+            **Smoke tests:** ✅ pass [`script/check_device_catalog.py`](../blob/main/script/check_device_catalog.py) and [`script/check_bluetooth_proxy_catalog.py`](../blob/main/script/check_bluetooth_proxy_catalog.py) — known well-formed upstreams still extract with the expected board, variant, and component shape.
 
             ---
 
             Review checklist:
             - Skim the **Added** / **Removed** lists above for anything unexpected. A removed device usually means the upstream page was deleted or renamed.
-            - Hand-curated boards (no `source:` block) are never touched — only manifests with `source.type: esphome-devices` are owned by this sync.
+            - Hand-curated boards (no `source:` block) are never touched — each sync only owns manifests carrying its own `source.type` (`esphome-devices` or `bluetooth-proxies`).
             - If the diff looks weird, run `script/sync_esphome_devices.py --device <name>` locally to inspect a single device.
             - Merge to ship the new device catalog.
           labels: |

@@ -62,6 +62,11 @@ class PeerLinkSession:
     ws: web.WebSocketResponse
     noise: PeerLinkNoiseSession
     peer_ip: str
+    # Offloader display identity from the session's msg3; empty /
+    # False from older offloaders. ``register_peer_link_session``
+    # refreshes the stored peer row from these.
+    peer_friendly_name: str = ""
+    peer_ha_addon: bool = False
     # Loop-monotonic timestamp of the most recent pong (or session
     # start if no pong has landed yet). The heartbeat loop seeds
     # this just before its first sleep so a slow first pong
@@ -194,6 +199,9 @@ async def _run_peer_link_session(
     session: PeerLinkNoiseSession,
     dashboard_id: str,
     peer_ip: str,
+    *,
+    peer_friendly_name: str = "",
+    peer_ha_addon: bool = False,
 ) -> None:
     """
     Run the post-handshake receive loop + heartbeat for one session.
@@ -207,6 +215,8 @@ async def _run_peer_link_session(
         ws=ws,
         noise=session,
         peer_ip=peer_ip,
+        peer_friendly_name=peer_friendly_name,
+        peer_ha_addon=peer_ha_addon,
     )
     # Register before spawning the heartbeat — a duplicate connect
     # on the same loop tick must find this session in the registry
@@ -311,6 +321,14 @@ async def _dispatch_cancel_job(
     await controller.handle_cancel_job(session, parsed)
 
 
+async def _dispatch_reset_build_env(
+    controller: ReceiverController, session: PeerLinkSession, parsed: dict[str, Any]
+) -> None:
+    # Enqueues the receiver's full local build-env reset as a job tagged
+    # with the requesting session; replies with one reset_build_env_ack.
+    await controller.handle_reset_build_env(session, parsed)
+
+
 async def _dispatch_download_artifacts(
     controller: ReceiverController, session: PeerLinkSession, parsed: dict[str, Any]
 ) -> None:
@@ -329,6 +347,7 @@ _APP_FRAME_DISPATCH: dict[
     AppMessageType.SUBMIT_JOB_CHUNK.value: _dispatch_submit_job_chunk,
     AppMessageType.CANCEL_JOB.value: _dispatch_cancel_job,
     AppMessageType.DOWNLOAD_ARTIFACTS.value: _dispatch_download_artifacts,
+    AppMessageType.RESET_BUILD_ENV.value: _dispatch_reset_build_env,
 }
 
 

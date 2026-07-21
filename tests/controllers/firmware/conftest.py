@@ -45,6 +45,7 @@ from esphome_device_builder.models import (
     DeviceState,
     EventType,
     FirmwareJob,
+    JobSource,
     JobType,
     PeerQueueStatusSnapshotEntry,
     PeerStatus,
@@ -120,8 +121,7 @@ def firmware_controller_factory(
       enqueue a rejected request crash visibly.
 
     - ``with_terminate=False`` (default): when set ``True``,
-      install ``_current_job`` / ``_current_process`` /
-      ``_cancel_requested`` / ``_terminate_current_process``.
+      install ``_cancel_requested`` / ``_terminate_job_process``.
       Only ``cancel`` reaches into these.
 
     - ``with_real_persistence=False`` (default): ``_persist_jobs``
@@ -195,16 +195,6 @@ def firmware_controller_factory(
         # binding doesn't treat the lambda as an unbound method.
         controller._db.create_background_task = lambda coro: coro.close()
 
-        # ``_finalize_terminal`` releases the runner slot before
-        # firing — so ``_current_job`` / ``_current_process`` need
-        # to exist on every stub (default ``None``, matching
-        # production's ``__init__``) even on test paths that
-        # don't drive the runner. Without this, cancel-queued /
-        # supersede tests that fire JOB_CANCELLED through the
-        # helper crash on ``AttributeError``.
-        controller.state.compile_lane.current_job = None
-        controller.state.compile_lane.current_process = None
-
         if with_queue:
             # ``put_nowait`` / ``qsize`` are sync on a real Queue; keep them
             # sync here (the enqueue path uses ``put_nowait``) while ``get``
@@ -217,7 +207,7 @@ def firmware_controller_factory(
         if with_terminate:
             controller.state.cancel_requested = set()
             controller.state.cancel_events = {}
-            controller._terminate_current_process = AsyncMock()
+            controller._terminate_job_process = AsyncMock()
 
         return controller
 
@@ -234,7 +224,6 @@ def bare_firmware_controller_factory() -> BareFirmwareControllerFactory:
     def _make(
         *,
         esphome_cmd: list[str] | None = None,
-        current_job: object | None = None,
         with_mock_db: bool = False,
     ) -> FirmwareController:
         controller = FirmwareController.__new__(FirmwareController)
@@ -242,8 +231,6 @@ def bare_firmware_controller_factory() -> BareFirmwareControllerFactory:
         controller.download_tokens = DownloadTokens()
         if esphome_cmd is not None:
             controller.state.esphome_cmd = esphome_cmd
-        if current_job is not None:
-            controller.state.compile_lane.current_job = current_job
         if with_mock_db:
             controller._db = MagicMock()
             controller._db.devices = None
@@ -387,15 +374,26 @@ def wire_real_queue(controller: FirmwareController) -> None:
         return
 
     controller._supersede_active_jobs = _supersede  # type: ignore[assignment]
-    controller.state.compile_lane.current_job = None
-    controller.state.compile_lane.current_process = None
     controller.state.cancel_requested = set()
     controller.state.cancel_events = {}
 
 
-def wire_background_tasks(controller: FirmwareController) -> None:
-    """Run work scheduled via ``create_background_task`` (e.g. the rename revert) for real."""
-    controller._db.create_background_task = asyncio.create_task
+def wire_background_tasks(controller: FirmwareController) -> list[asyncio.Task[Any]]:
+    """
+    Run work scheduled via ``create_background_task`` (e.g. the rename revert) for real.
+
+    Returns the spawned tasks so a test can ``gather`` them before asserting
+    on their side effects.
+    """
+    tasks: list[asyncio.Task[Any]] = []
+
+    def _spawn(coro: Any) -> asyncio.Task[Any]:
+        task = asyncio.get_running_loop().create_task(coro)
+        tasks.append(task)
+        return task
+
+    controller._db.create_background_task = _spawn
+    return tasks
 
 
 def upload_of(controller: FirmwareController, compile_job: FirmwareJob) -> FirmwareJob:
@@ -443,6 +441,13 @@ class StubDevices:
 def wire_devices(controller: FirmwareController) -> None:
     """Attach a no-op ``DevicesController`` stub for ``_build_cache_args``."""
     controller._db.devices = StubDevices()  # type: ignore[attr-defined]
+
+
+def seed_yamls(tmp_path: Path, *names: str) -> None:
+    """Write a minimal ESPHome YAML stub per *names* into *tmp_path*."""
+    for name in names:
+        stem = name.removesuffix(".yaml")
+        (tmp_path / name).write_text(f"esphome:\n  name: {stem}\n", encoding="utf-8")
 
 
 def attach_device(controller: FirmwareController, configuration: str, state: DeviceState) -> None:
@@ -574,3 +579,48 @@ def stub_offloader(controller: Any, snapshot: BuildSchedulerInputs) -> MagicMock
     offloader.get_pairing.side_effect = _get_pairing
     controller._db.remote_build_offloader = offloader
     return offloader
+
+
+REMOTE_PIN = "a" * 64
+
+
+def make_remote_job(*, job_id: str = "remote-1") -> FirmwareJob:
+    """Build a REMOTE-source COMPILE job matching the peer-link test wiring."""
+    return FirmwareJob(
+        job_id=job_id,
+        configuration="kitchen.yaml",
+        job_type=JobType.COMPILE,
+        source=JobSource.REMOTE,
+        source_pin_sha256=REMOTE_PIN,
+        source_label="desktop",
+    )
+
+
+def capture_local_events(
+    controller: Any,
+) -> dict[EventType, list[dict[str, Any]]]:
+    """Subscribe a real ``EventBus`` to the local ``JOB_*`` events.
+
+    Returns a captured-events dict the assertion side can index
+    by event type. The helper installs the bus on
+    ``controller._db.bus`` so the runner's fires land here.
+    """
+    bus = EventBus()
+    captured: dict[EventType, list[dict[str, Any]]] = {
+        EventType.JOB_OUTPUT: [],
+        EventType.JOB_PROGRESS: [],
+        EventType.JOB_COMPLETED: [],
+        EventType.JOB_FAILED: [],
+        EventType.JOB_CANCELLED: [],
+    }
+
+    def _make_listener(key: EventType) -> Any:
+        def _listen(event: Any) -> None:
+            captured[key].append(event.data)
+
+        return _listen
+
+    for et in captured:
+        bus.add_listener(et, _make_listener(et))
+    controller._db.bus = bus
+    return captured

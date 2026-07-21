@@ -31,12 +31,6 @@ featured_components:
     icon: mdi:bell
     id: binary_sensor_gpio_1
     name: DoorBell
-- id: uptime_seconds
-  component_id: sensor.uptime
-  fields:
-    update_interval: 60
-    id: uptime_seconds
-    name: uptime_seconds
 - id: lock
   component_id: switch.gpio
   fields:
@@ -51,5 +45,5 @@ source:
   type: esphome-devices
   remote_id: ESPBell-LITE
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/ESPBell-LITE/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: d6541565ad81645ed51f470fc7afd7226e14e80d27d85bff3f79bad1d5e654b3

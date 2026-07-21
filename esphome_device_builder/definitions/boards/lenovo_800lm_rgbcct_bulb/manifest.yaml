@@ -39,7 +39,7 @@ featured_components:
     white_brightness: output_brightness
     color_temperature: output_temp
     id: light_rgbct_1
-    name: Rgbct 1
+    name: Lenovo 800lm RGBCCT
 - id: output_r
   component_id: output.esp8266_pwm
   fields:
@@ -79,7 +79,7 @@ featured_components:
     id: output_temp
 featured_bundles:
 - id: light_rgbct_1_setup
-  name: Rgbct (full setup)
+  name: Lenovo 800lm RGBCCT (full setup)
   component_ids:
   - output_r
   - output_g
@@ -91,5 +91,5 @@ source:
   type: esphome-devices
   remote_id: Lenovo-800lm-RGBCCT-Bulb
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Lenovo-800lm-RGBCCT-Bulb/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 2ce5a49eee5dc9a825b262b98ef3779738cade0a0eb9c995020ce7bd3c0c0228

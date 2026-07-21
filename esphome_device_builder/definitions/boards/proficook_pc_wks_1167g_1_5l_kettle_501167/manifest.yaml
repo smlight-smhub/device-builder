@@ -9,8 +9,30 @@ hardware:
   - wifi
 images:
 - https://raw.githubusercontent.com/esphome/devices.esphome.io/main/src/docs/devices/ProfiCook-PC-WKS-1167G-1.5L-Kettle-501167/device.jpg
+pins:
+- gpio: 1
+  available: false
+  occupied_by: uart
+- gpio: 3
+  available: false
+  occupied_by: uart
 docs_url: https://devices.esphome.io/devices/ProfiCook-PC-WKS-1167G-1.5L-Kettle-501167/
 featured_components:
+- id: uart_bus
+  component_id: uart
+  fields:
+    rx_pin:
+      value: 3
+      locked: true
+    tx_pin:
+      value: 1
+      locked: true
+    baud_rate: 9600
+- id: tuya_hub
+  component_id: tuya
+  fields: {}
+  requires:
+  - uart_bus
 - id: number_tuya_1
   component_id: number.tuya
   fields:
@@ -21,12 +43,18 @@ featured_components:
     step: 1
     id: number_tuya_1
     name: Kettle Custom Temperature
+  requires:
+  - uart_bus
+  - tuya_hub
 - id: tuya_105
   component_id: sensor.tuya
   fields:
     sensor_datapoint: 105
     id: tuya_105
     name: tuya_105
+  requires:
+  - uart_bus
+  - tuya_hub
 - id: kettle_remaining
   component_id: sensor.tuya
   fields:
@@ -36,27 +64,39 @@ featured_components:
     accuracy_decimals: 0
     id: kettle_remaining
     name: Kettle Remaining Time
+  requires:
+  - uart_bus
+  - tuya_hub
 - id: tuya_101
   component_id: sensor.tuya
   fields:
     sensor_datapoint: 101
     id: tuya_101
     name: tuya_101
+  requires:
+  - uart_bus
+  - tuya_hub
 - id: tuya_106
   component_id: sensor.tuya
   fields:
     sensor_datapoint: 106
     id: tuya_106
     name: tuya_106
+  requires:
+  - uart_bus
+  - tuya_hub
 - id: tuya_104
   component_id: sensor.tuya
   fields:
     sensor_datapoint: 104
     id: tuya_104
     name: tuya_104
+  requires:
+  - uart_bus
+  - tuya_hub
 source:
   type: esphome-devices
   remote_id: ProfiCook-PC-WKS-1167G-1.5L-Kettle-501167
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/ProfiCook-PC-WKS-1167G-1.5L-Kettle-501167/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 65bbff79e0d48ed63d91252949ea2165874ac346e44530a3eafc455c49ed4932

@@ -15,6 +15,7 @@ from ...helpers.device_yaml import (
     configuration_filename,
     parse_esphome_meta,
     resolved_device_name,
+    retarget_fallback_ap_ssid,
 )
 from ...helpers.hostname import default_mdns_address
 from ...helpers.storage_path import resolve_storage_path
@@ -211,6 +212,7 @@ async def rename_device(
     new_path = controller._db.settings.rel_path(new_filename)
 
     content = await _read_device_yaml_or_raise(controller, configuration)
+    old_meta = parse_esphome_meta(content)
 
     # Reject same-name renames up-front. Compare against the device's real
     # ``esphome.name``, not the filename stem: an uploaded config keeps its
@@ -218,7 +220,7 @@ async def rename_device(
     # a stem compare wrongly rejects the legitimate ``test_1`` -> ``test-1``
     # rename and wrongly accepts a real no-op whose filename differs from its
     # name.
-    if new_name == resolved_device_name(content, configuration):
+    if new_name == resolved_device_name(old_meta, configuration):
         raise CommandError(
             ErrorCode.INVALID_ARGS,
             "new_name must differ from the current device name",
@@ -236,6 +238,9 @@ async def rename_device(
     # Single rewrite + refusal point: offline, in-place, and the OTA chain
     # all retarget the name the same way.
     new_content = rewrite_rename_content(content, new_name, remedy=RENAME_REMEDY)
+    # Retarget a name-labelled fallback-AP ssid; a friendly-labelled
+    # one no-ops since its label is unchanged by a rename.
+    new_content = retarget_fallback_ap_ssid(new_content, old_meta, parse_esphome_meta(new_content))
 
     # An in-place rename can't go through the OTA chain (same filename), so
     # it rewrites the name with no flash even when the caller wanted the OTA
@@ -405,7 +410,7 @@ async def edit_friendly_name(
         # can't safely insert into either shape.
         raise CommandError(ErrorCode.INVALID_ARGS, str(exc)) from exc
 
-    # Round-trip check: parse the rewritten YAML through the
+    # Round-trip check: parse the upserted YAML through the
     # same reader the scanner uses. Defends against the
     # line-based upsert producing a YAML shape that serializes
     # fine but the reader misinterprets; a real bug shipped
@@ -415,8 +420,8 @@ async def edit_friendly_name(
     # ``# Board:`` at column 0, treated it as a fresh top-level
     # key, dropped the ``esphome:`` context, and silently lost
     # ``friendly_name`` on every load.
-    _, parsed_friendly, _, _ = parse_esphome_meta(new_content)
-    if parsed_friendly != new_friendly_name:
+    new_meta = parse_esphome_meta(new_content)
+    if new_meta.friendly_name != new_friendly_name:
         raise CommandError(
             ErrorCode.INTERNAL_ERROR,
             "Edited YAML doesn't round-trip through the reader — "
@@ -427,6 +432,9 @@ async def edit_friendly_name(
             "credentials, API keys, and static IPs) so we can "
             "extend the rewriter's coverage.",
         )
+    # Retarget the generated fallback-AP ssid, which the leaf upsert
+    # doesn't reach.
+    new_content = retarget_fallback_ap_ssid(new_content, parse_esphome_meta(content), new_meta)
     if new_content == content:
         # Idempotent: same value submitted (or the leaf already
         # was that value). Skip the write and signal no install

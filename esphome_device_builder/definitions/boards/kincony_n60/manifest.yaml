@@ -20,6 +20,12 @@ pins:
 - gpio: 2
   available: false
   occupied_by: Ethernet INT
+- gpio: 9
+  available: false
+  occupied_by: uart
+- gpio: 10
+  available: false
+  occupied_by: uart
 - gpio: 41
   available: false
   occupied_by: Ethernet CS
@@ -34,6 +40,32 @@ pins:
   occupied_by: Ethernet MISO
 docs_url: https://devices.esphome.io/devices/KinCony-N60/
 featured_components:
+- id: modbus_bus
+  component_id: modbus
+  fields: {}
+  requires:
+  - uart_bus
+- id: uart_bus
+  component_id: uart
+  fields:
+    rx_pin:
+      value: 9
+      locked: true
+    tx_pin:
+      value: 10
+      locked: true
+    baud_rate: 115200
+    stop_bits: 1
+    data_bits: 8
+    parity: NONE
+- id: modbus_controller_hub
+  component_id: modbus_controller
+  fields:
+    address: 1
+    update_interval: 5s
+  requires:
+  - modbus_bus
+  - uart_bus
 - id: onboard_ethernet
   component_id: ethernet
   name: Onboard Ethernet
@@ -68,8 +100,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_1_current_1
     name: bl0910_1_current_1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_current_2
   component_id: sensor.modbus_controller
   fields:
@@ -79,8 +119,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_1_current_2
     name: bl0910_1_current_2
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_current_3
   component_id: sensor.modbus_controller
   fields:
@@ -90,8 +138,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_1_current_3
     name: bl0910_1_current_3
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_current_4
   component_id: sensor.modbus_controller
   fields:
@@ -101,8 +157,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_1_current_4
     name: bl0910_1_current_4
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_current_5
   component_id: sensor.modbus_controller
   fields:
@@ -112,8 +176,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_1_current_5
     name: bl0910_1_current_5
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_current_6
   component_id: sensor.modbus_controller
   fields:
@@ -123,8 +195,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_1_current_6
     name: bl0910_1_current_6
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_current_7
   component_id: sensor.modbus_controller
   fields:
@@ -134,8 +214,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_1_current_7
     name: bl0910_1_current_7
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_current_8
   component_id: sensor.modbus_controller
   fields:
@@ -145,8 +233,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_1_current_8
     name: bl0910_1_current_8
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_current_9
   component_id: sensor.modbus_controller
   fields:
@@ -156,8 +252,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_1_current_9
     name: bl0910_1_current_9
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_current_10
   component_id: sensor.modbus_controller
   fields:
@@ -167,8 +271,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_1_current_10
     name: bl0910_1_current_10
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_watt_1
   component_id: sensor.modbus_controller
   fields:
@@ -178,8 +290,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_1_watt_1
     name: bl0910_1_power_1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_watt_2
   component_id: sensor.modbus_controller
   fields:
@@ -189,8 +309,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_1_watt_2
     name: bl0910_1_power_2
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_watt_3
   component_id: sensor.modbus_controller
   fields:
@@ -200,8 +328,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_1_watt_3
     name: bl0910_1_power_3
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_watt_4
   component_id: sensor.modbus_controller
   fields:
@@ -211,8 +347,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_1_watt_4
     name: bl0910_1_power_4
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_watt_5
   component_id: sensor.modbus_controller
   fields:
@@ -222,8 +366,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_1_watt_5
     name: bl0910_1_power_5
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_watt_6
   component_id: sensor.modbus_controller
   fields:
@@ -233,8 +385,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_1_watt_6
     name: bl0910_1_power_6
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_watt_7
   component_id: sensor.modbus_controller
   fields:
@@ -244,8 +404,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_1_watt_7
     name: bl0910_1_power_7
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_watt_8
   component_id: sensor.modbus_controller
   fields:
@@ -255,8 +423,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_1_watt_8
     name: bl0910_1_power_8
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_watt_9
   component_id: sensor.modbus_controller
   fields:
@@ -266,8 +442,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_1_watt_9
     name: bl0910_1_power_9
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_watt_10
   component_id: sensor.modbus_controller
   fields:
@@ -277,8 +461,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_1_watt_10
     name: bl0910_1_power_10
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_energy_1
   component_id: sensor.modbus_controller
   fields:
@@ -291,6 +483,10 @@ featured_components:
     value_type: U_DWORD_R
     id: n60_1_energy_1
     name: bl0910_1_energy_1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_energy_2
   component_id: sensor.modbus_controller
   fields:
@@ -303,6 +499,10 @@ featured_components:
     value_type: U_DWORD_R
     id: n60_1_energy_2
     name: bl0910_1_energy_2
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_energy_3
   component_id: sensor.modbus_controller
   fields:
@@ -315,6 +515,10 @@ featured_components:
     value_type: U_DWORD_R
     id: n60_1_energy_3
     name: bl0910_1_energy_3
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_energy_4
   component_id: sensor.modbus_controller
   fields:
@@ -327,6 +531,10 @@ featured_components:
     value_type: U_DWORD_R
     id: n60_1_energy_4
     name: bl0910_1_energy_4
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_energy_5
   component_id: sensor.modbus_controller
   fields:
@@ -339,6 +547,10 @@ featured_components:
     value_type: U_DWORD_R
     id: n60_1_energy_5
     name: bl0910_1_energy_5
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_energy_6
   component_id: sensor.modbus_controller
   fields:
@@ -351,6 +563,10 @@ featured_components:
     value_type: U_DWORD_R
     id: n60_1_energy_6
     name: bl0910_1_energy_6
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_energy_7
   component_id: sensor.modbus_controller
   fields:
@@ -363,6 +579,10 @@ featured_components:
     value_type: U_DWORD_R
     id: n60_1_energy_7
     name: bl0910_1_energy_7
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_energy_8
   component_id: sensor.modbus_controller
   fields:
@@ -375,6 +595,10 @@ featured_components:
     value_type: U_DWORD_R
     id: n60_1_energy_8
     name: bl0910_1_energy_8
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_energy_9
   component_id: sensor.modbus_controller
   fields:
@@ -387,6 +611,10 @@ featured_components:
     value_type: U_DWORD_R
     id: n60_1_energy_9
     name: bl0910_1_energy_9
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_energy_10
   component_id: sensor.modbus_controller
   fields:
@@ -399,6 +627,10 @@ featured_components:
     value_type: U_DWORD_R
     id: n60_1_energy_10
     name: bl0910_1_energy_10
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_energy_sum
   component_id: sensor.modbus_controller
   fields:
@@ -411,6 +643,10 @@ featured_components:
     value_type: U_DWORD_R
     id: n60_1_energy_sum
     name: bl0910_1_energy_sum
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_voltage
   component_id: sensor.modbus_controller
   fields:
@@ -420,8 +656,16 @@ featured_components:
     device_class: voltage
     accuracy_decimals: 1
     value_type: U_WORD
+    filters:
+      value:
+      - multiply: 0.01
+      locked: true
     id: n60_1_voltage
     name: bl0910_1_voltage
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_period
   component_id: sensor.modbus_controller
   fields:
@@ -431,8 +675,16 @@ featured_components:
     device_class: frequency
     accuracy_decimals: 1
     value_type: U_WORD
+    filters:
+      value:
+      - multiply: 0.01
+      locked: true
     id: n60_1_period
     name: bl0910_1_frequency
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_1_tps_1
   component_id: sensor.modbus_controller
   fields:
@@ -444,6 +696,10 @@ featured_components:
     value_type: FP32_R
     id: n60_1_tps_1
     name: bl0910_1_tps1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_current_1
   component_id: sensor.modbus_controller
   fields:
@@ -453,8 +709,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_2_current_1
     name: bl0910_2_current_1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_current_2
   component_id: sensor.modbus_controller
   fields:
@@ -464,8 +728,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_2_current_2
     name: bl0910_2_current_2
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_current_3
   component_id: sensor.modbus_controller
   fields:
@@ -475,8 +747,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_2_current_3
     name: bl0910_2_current_3
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_current_4
   component_id: sensor.modbus_controller
   fields:
@@ -486,8 +766,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_2_current_4
     name: bl0910_2_current_4
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_current_5
   component_id: sensor.modbus_controller
   fields:
@@ -497,8 +785,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_2_current_5
     name: bl0910_2_current_5
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_current_6
   component_id: sensor.modbus_controller
   fields:
@@ -508,8 +804,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_2_current_6
     name: bl0910_2_current_6
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_current_7
   component_id: sensor.modbus_controller
   fields:
@@ -519,8 +823,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_2_current_7
     name: bl0910_2_current_7
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_current_8
   component_id: sensor.modbus_controller
   fields:
@@ -530,8 +842,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_2_current_8
     name: bl0910_2_current_8
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_current_9
   component_id: sensor.modbus_controller
   fields:
@@ -541,8 +861,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_2_current_9
     name: bl0910_2_current_9
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_current_10
   component_id: sensor.modbus_controller
   fields:
@@ -552,8 +880,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_2_current_10
     name: bl0910_2_current_10
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_watt_1
   component_id: sensor.modbus_controller
   fields:
@@ -563,8 +899,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_2_watt_1
     name: bl0910_2_power_1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_watt_2
   component_id: sensor.modbus_controller
   fields:
@@ -574,8 +918,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_2_watt_2
     name: bl0910_2_power_2
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_watt_3
   component_id: sensor.modbus_controller
   fields:
@@ -585,8 +937,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_2_watt_3
     name: bl0910_2_power_3
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_watt_4
   component_id: sensor.modbus_controller
   fields:
@@ -596,8 +956,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_2_watt_4
     name: bl0910_2_power_4
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_watt_5
   component_id: sensor.modbus_controller
   fields:
@@ -607,8 +975,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_2_watt_5
     name: bl0910_2_power_5
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_watt_6
   component_id: sensor.modbus_controller
   fields:
@@ -618,8 +994,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_2_watt_6
     name: bl0910_2_power_6
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_watt_7
   component_id: sensor.modbus_controller
   fields:
@@ -629,8 +1013,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_2_watt_7
     name: bl0910_2_power_7
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_watt_8
   component_id: sensor.modbus_controller
   fields:
@@ -640,8 +1032,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_2_watt_8
     name: bl0910_2_power_8
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_watt_9
   component_id: sensor.modbus_controller
   fields:
@@ -651,8 +1051,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_2_watt_9
     name: bl0910_2_power_9
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_watt_10
   component_id: sensor.modbus_controller
   fields:
@@ -662,8 +1070,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_2_watt_10
     name: bl0910_2_power_10
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_energy_1
   component_id: sensor.modbus_controller
   fields:
@@ -676,6 +1092,10 @@ featured_components:
     state_class: total_increasing
     id: n60_2_energy_1
     name: bl0910_2_energy_1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_energy_2
   component_id: sensor.modbus_controller
   fields:
@@ -688,6 +1108,10 @@ featured_components:
     state_class: total_increasing
     id: n60_2_energy_2
     name: bl0910_2_energy_2
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_energy_3
   component_id: sensor.modbus_controller
   fields:
@@ -700,6 +1124,10 @@ featured_components:
     state_class: total_increasing
     id: n60_2_energy_3
     name: bl0910_2_energy_3
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_energy_4
   component_id: sensor.modbus_controller
   fields:
@@ -712,6 +1140,10 @@ featured_components:
     state_class: total_increasing
     id: n60_2_energy_4
     name: bl0910_2_energy_4
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_energy_5
   component_id: sensor.modbus_controller
   fields:
@@ -724,6 +1156,10 @@ featured_components:
     state_class: total_increasing
     id: n60_2_energy_5
     name: bl0910_2_energy_5
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_energy_6
   component_id: sensor.modbus_controller
   fields:
@@ -736,6 +1172,10 @@ featured_components:
     state_class: total_increasing
     id: n60_2_energy_6
     name: bl0910_2_energy_6
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_energy_7
   component_id: sensor.modbus_controller
   fields:
@@ -748,6 +1188,10 @@ featured_components:
     state_class: total_increasing
     id: n60_2_energy_7
     name: bl0910_2_energy_7
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_energy_8
   component_id: sensor.modbus_controller
   fields:
@@ -760,6 +1204,10 @@ featured_components:
     state_class: total_increasing
     id: n60_2_energy_8
     name: bl0910_2_energy_8
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_energy_9
   component_id: sensor.modbus_controller
   fields:
@@ -772,6 +1220,10 @@ featured_components:
     state_class: total_increasing
     id: n60_2_energy_9
     name: bl0910_2_energy_9
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_energy_10
   component_id: sensor.modbus_controller
   fields:
@@ -784,6 +1236,10 @@ featured_components:
     state_class: total_increasing
     id: n60_2_energy_10
     name: bl0910_2_energy_10
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_energy_sum
   component_id: sensor.modbus_controller
   fields:
@@ -796,6 +1252,10 @@ featured_components:
     state_class: total_increasing
     id: n60_2_energy_sum
     name: bl0910_2_energy_sum
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_voltage
   component_id: sensor.modbus_controller
   fields:
@@ -805,8 +1265,16 @@ featured_components:
     device_class: voltage
     accuracy_decimals: 1
     value_type: U_WORD
+    filters:
+      value:
+      - multiply: 0.01
+      locked: true
     id: n60_2_voltage
     name: bl0910_2_voltage
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_period
   component_id: sensor.modbus_controller
   fields:
@@ -816,8 +1284,16 @@ featured_components:
     device_class: frequency
     accuracy_decimals: 1
     value_type: U_WORD
+    filters:
+      value:
+      - multiply: 0.01
+      locked: true
     id: n60_2_period
     name: bl0910_2_frequency
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_2_tps_1
   component_id: sensor.modbus_controller
   fields:
@@ -829,6 +1305,10 @@ featured_components:
     value_type: FP32_R
     id: n60_2_tps_1
     name: bl0910_2_tps1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_current_1
   component_id: sensor.modbus_controller
   fields:
@@ -838,8 +1318,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_3_current_1
     name: bl0910_3_current_1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_current_2
   component_id: sensor.modbus_controller
   fields:
@@ -849,8 +1337,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_3_current_2
     name: bl0910_3_current_2
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_current_3
   component_id: sensor.modbus_controller
   fields:
@@ -860,8 +1356,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_3_current_3
     name: bl0910_3_current_3
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_current_4
   component_id: sensor.modbus_controller
   fields:
@@ -871,8 +1375,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_3_current_4
     name: bl0910_3_current_4
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_current_5
   component_id: sensor.modbus_controller
   fields:
@@ -882,8 +1394,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_3_current_5
     name: bl0910_3_current_5
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_current_6
   component_id: sensor.modbus_controller
   fields:
@@ -893,8 +1413,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_3_current_6
     name: bl0910_3_current_6
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_current_7
   component_id: sensor.modbus_controller
   fields:
@@ -904,8 +1432,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_3_current_7
     name: bl0910_3_current_7
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_current_8
   component_id: sensor.modbus_controller
   fields:
@@ -915,8 +1451,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_3_current_8
     name: bl0910_3_current_8
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_current_9
   component_id: sensor.modbus_controller
   fields:
@@ -926,8 +1470,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_3_current_9
     name: bl0910_3_current_9
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_current_10
   component_id: sensor.modbus_controller
   fields:
@@ -937,8 +1489,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_3_current_10
     name: bl0910_3_current_10
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_watt_1
   component_id: sensor.modbus_controller
   fields:
@@ -948,8 +1508,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_3_watt_1
     name: bl0910_3_power_1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_watt_2
   component_id: sensor.modbus_controller
   fields:
@@ -959,8 +1527,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_3_watt_2
     name: bl0910_3_power_2
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_watt_3
   component_id: sensor.modbus_controller
   fields:
@@ -970,8 +1546,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_3_watt_3
     name: bl0910_3_power_3
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_watt_4
   component_id: sensor.modbus_controller
   fields:
@@ -981,8 +1565,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_3_watt_4
     name: bl0910_3_power_4
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_watt_5
   component_id: sensor.modbus_controller
   fields:
@@ -992,8 +1584,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_3_watt_5
     name: bl0910_3_power_5
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_watt_6
   component_id: sensor.modbus_controller
   fields:
@@ -1003,8 +1603,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_3_watt_6
     name: bl0910_3_power_6
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_watt_7
   component_id: sensor.modbus_controller
   fields:
@@ -1014,8 +1622,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_3_watt_7
     name: bl0910_3_power_7
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_watt_8
   component_id: sensor.modbus_controller
   fields:
@@ -1025,8 +1641,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_3_watt_8
     name: bl0910_3_power_8
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_watt_9
   component_id: sensor.modbus_controller
   fields:
@@ -1036,8 +1660,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_3_watt_9
     name: bl0910_3_power_9
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_watt_10
   component_id: sensor.modbus_controller
   fields:
@@ -1047,8 +1679,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_3_watt_10
     name: bl0910_3_power_10
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_energy_1
   component_id: sensor.modbus_controller
   fields:
@@ -1061,6 +1701,10 @@ featured_components:
     state_class: total_increasing
     id: n60_3_energy_1
     name: bl0910_3_energy_1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_energy_2
   component_id: sensor.modbus_controller
   fields:
@@ -1073,6 +1717,10 @@ featured_components:
     state_class: total_increasing
     id: n60_3_energy_2
     name: bl0910_3_energy_2
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_energy_3
   component_id: sensor.modbus_controller
   fields:
@@ -1085,6 +1733,10 @@ featured_components:
     state_class: total_increasing
     id: n60_3_energy_3
     name: bl0910_3_energy_3
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_energy_4
   component_id: sensor.modbus_controller
   fields:
@@ -1097,6 +1749,10 @@ featured_components:
     state_class: total_increasing
     id: n60_3_energy_4
     name: bl0910_3_energy_4
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_energy_5
   component_id: sensor.modbus_controller
   fields:
@@ -1109,6 +1765,10 @@ featured_components:
     state_class: total_increasing
     id: n60_3_energy_5
     name: bl0910_3_energy_5
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_energy_6
   component_id: sensor.modbus_controller
   fields:
@@ -1121,6 +1781,10 @@ featured_components:
     state_class: total_increasing
     id: n60_3_energy_6
     name: bl0910_3_energy_6
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_energy_7
   component_id: sensor.modbus_controller
   fields:
@@ -1133,6 +1797,10 @@ featured_components:
     state_class: total_increasing
     id: n60_3_energy_7
     name: bl0910_3_energy_7
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_energy_8
   component_id: sensor.modbus_controller
   fields:
@@ -1145,6 +1813,10 @@ featured_components:
     state_class: total_increasing
     id: n60_3_energy_8
     name: bl0910_3_energy_8
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_energy_9
   component_id: sensor.modbus_controller
   fields:
@@ -1157,6 +1829,10 @@ featured_components:
     state_class: total_increasing
     id: n60_3_energy_9
     name: bl0910_3_energy_9
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_energy_10
   component_id: sensor.modbus_controller
   fields:
@@ -1169,6 +1845,10 @@ featured_components:
     state_class: total_increasing
     id: n60_3_energy_10
     name: bl0910_3_energy_10
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_energy_sum
   component_id: sensor.modbus_controller
   fields:
@@ -1181,6 +1861,10 @@ featured_components:
     state_class: total_increasing
     id: n60_3_energy_sum
     name: bl0910_3_energy_sum
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_voltage
   component_id: sensor.modbus_controller
   fields:
@@ -1190,8 +1874,16 @@ featured_components:
     device_class: voltage
     accuracy_decimals: 1
     value_type: U_WORD
+    filters:
+      value:
+      - multiply: 0.01
+      locked: true
     id: n60_3_voltage
     name: bl0910_3_voltage
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_period
   component_id: sensor.modbus_controller
   fields:
@@ -1201,8 +1893,16 @@ featured_components:
     device_class: frequency
     accuracy_decimals: 1
     value_type: U_WORD
+    filters:
+      value:
+      - multiply: 0.01
+      locked: true
     id: n60_3_period
     name: bl0910_3_frequency
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_3_tps_1
   component_id: sensor.modbus_controller
   fields:
@@ -1214,6 +1914,10 @@ featured_components:
     value_type: FP32_R
     id: n60_3_tps_1
     name: bl0910_3_tps1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_current_1
   component_id: sensor.modbus_controller
   fields:
@@ -1223,8 +1927,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_4_current_1
     name: bl0910_4_current_1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_current_2
   component_id: sensor.modbus_controller
   fields:
@@ -1234,8 +1946,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_4_current_2
     name: bl0910_4_current_2
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_current_3
   component_id: sensor.modbus_controller
   fields:
@@ -1245,8 +1965,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_4_current_3
     name: bl0910_4_current_3
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_current_4
   component_id: sensor.modbus_controller
   fields:
@@ -1256,8 +1984,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_4_current_4
     name: bl0910_4_current_4
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_current_5
   component_id: sensor.modbus_controller
   fields:
@@ -1267,8 +2003,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_4_current_5
     name: bl0910_4_current_5
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_current_6
   component_id: sensor.modbus_controller
   fields:
@@ -1278,8 +2022,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_4_current_6
     name: bl0910_4_current_6
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_current_7
   component_id: sensor.modbus_controller
   fields:
@@ -1289,8 +2041,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_4_current_7
     name: bl0910_4_current_7
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_current_8
   component_id: sensor.modbus_controller
   fields:
@@ -1300,8 +2060,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_4_current_8
     name: bl0910_4_current_8
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_current_9
   component_id: sensor.modbus_controller
   fields:
@@ -1311,8 +2079,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_4_current_9
     name: bl0910_4_current_9
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_current_10
   component_id: sensor.modbus_controller
   fields:
@@ -1322,8 +2098,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_4_current_10
     name: bl0910_4_current_10
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_watt_1
   component_id: sensor.modbus_controller
   fields:
@@ -1333,8 +2117,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_4_watt_1
     name: bl0910_4_power_1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_watt_2
   component_id: sensor.modbus_controller
   fields:
@@ -1344,8 +2136,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_4_watt_2
     name: bl0910_4_power_2
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_watt_3
   component_id: sensor.modbus_controller
   fields:
@@ -1355,8 +2155,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_4_watt_3
     name: bl0910_4_power_3
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_watt_4
   component_id: sensor.modbus_controller
   fields:
@@ -1366,8 +2174,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_4_watt_4
     name: bl0910_4_power_4
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_watt_5
   component_id: sensor.modbus_controller
   fields:
@@ -1377,8 +2193,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_4_watt_5
     name: bl0910_4_power_5
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_watt_6
   component_id: sensor.modbus_controller
   fields:
@@ -1388,8 +2212,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_4_watt_6
     name: bl0910_4_power_6
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_watt_7
   component_id: sensor.modbus_controller
   fields:
@@ -1399,8 +2231,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_4_watt_7
     name: bl0910_4_power_7
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_watt_8
   component_id: sensor.modbus_controller
   fields:
@@ -1410,8 +2250,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_4_watt_8
     name: bl0910_4_power_8
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_watt_9
   component_id: sensor.modbus_controller
   fields:
@@ -1421,8 +2269,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_4_watt_9
     name: bl0910_4_power_9
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_watt_10
   component_id: sensor.modbus_controller
   fields:
@@ -1432,8 +2288,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_4_watt_10
     name: bl0910_4_power_10
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_energy_1
   component_id: sensor.modbus_controller
   fields:
@@ -1446,6 +2310,10 @@ featured_components:
     state_class: total_increasing
     id: n60_4_energy_1
     name: bl0910_4_energy_1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_energy_2
   component_id: sensor.modbus_controller
   fields:
@@ -1458,6 +2326,10 @@ featured_components:
     state_class: total_increasing
     id: n60_4_energy_2
     name: bl0910_4_energy_2
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_energy_3
   component_id: sensor.modbus_controller
   fields:
@@ -1470,6 +2342,10 @@ featured_components:
     state_class: total_increasing
     id: n60_4_energy_3
     name: bl0910_4_energy_3
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_energy_4
   component_id: sensor.modbus_controller
   fields:
@@ -1482,6 +2358,10 @@ featured_components:
     state_class: total_increasing
     id: n60_4_energy_4
     name: bl0910_4_energy_4
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_energy_5
   component_id: sensor.modbus_controller
   fields:
@@ -1494,6 +2374,10 @@ featured_components:
     state_class: total_increasing
     id: n60_4_energy_5
     name: bl0910_4_energy_5
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_energy_6
   component_id: sensor.modbus_controller
   fields:
@@ -1506,6 +2390,10 @@ featured_components:
     state_class: total_increasing
     id: n60_4_energy_6
     name: bl0910_4_energy_6
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_energy_7
   component_id: sensor.modbus_controller
   fields:
@@ -1518,6 +2406,10 @@ featured_components:
     state_class: total_increasing
     id: n60_4_energy_7
     name: bl0910_4_energy_7
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_energy_8
   component_id: sensor.modbus_controller
   fields:
@@ -1530,6 +2422,10 @@ featured_components:
     state_class: total_increasing
     id: n60_4_energy_8
     name: bl0910_4_energy_8
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_energy_9
   component_id: sensor.modbus_controller
   fields:
@@ -1542,6 +2438,10 @@ featured_components:
     state_class: total_increasing
     id: n60_4_energy_9
     name: bl0910_4_energy_9
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_energy_10
   component_id: sensor.modbus_controller
   fields:
@@ -1554,6 +2454,10 @@ featured_components:
     state_class: total_increasing
     id: n60_4_energy_10
     name: bl0910_4_energy_10
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_energy_sum
   component_id: sensor.modbus_controller
   fields:
@@ -1566,6 +2470,10 @@ featured_components:
     state_class: total_increasing
     id: n60_4_energy_sum
     name: bl0910_4_energy_sum
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_voltage
   component_id: sensor.modbus_controller
   fields:
@@ -1575,8 +2483,16 @@ featured_components:
     device_class: voltage
     accuracy_decimals: 1
     value_type: U_WORD
+    filters:
+      value:
+      - multiply: 0.01
+      locked: true
     id: n60_4_voltage
     name: bl0910_4_voltage
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_period
   component_id: sensor.modbus_controller
   fields:
@@ -1586,8 +2502,16 @@ featured_components:
     device_class: frequency
     accuracy_decimals: 1
     value_type: U_WORD
+    filters:
+      value:
+      - multiply: 0.01
+      locked: true
     id: n60_4_period
     name: bl0910_4_frequency
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_4_tps_1
   component_id: sensor.modbus_controller
   fields:
@@ -1599,6 +2523,10 @@ featured_components:
     value_type: FP32_R
     id: n60_4_tps_1
     name: bl0910_4_tps1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_current_1
   component_id: sensor.modbus_controller
   fields:
@@ -1608,8 +2536,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_5_current_1
     name: bl0910_5_current_1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_current_2
   component_id: sensor.modbus_controller
   fields:
@@ -1619,8 +2555,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_5_current_2
     name: bl0910_5_current_2
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_current_3
   component_id: sensor.modbus_controller
   fields:
@@ -1630,8 +2574,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_5_current_3
     name: bl0910_5_current_3
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_current_4
   component_id: sensor.modbus_controller
   fields:
@@ -1641,8 +2593,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_5_current_4
     name: bl0910_5_current_4
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_current_5
   component_id: sensor.modbus_controller
   fields:
@@ -1652,8 +2612,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_5_current_5
     name: bl0910_5_current_5
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_current_6
   component_id: sensor.modbus_controller
   fields:
@@ -1663,8 +2631,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_5_current_6
     name: bl0910_5_current_6
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_current_7
   component_id: sensor.modbus_controller
   fields:
@@ -1674,8 +2650,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_5_current_7
     name: bl0910_5_current_7
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_current_8
   component_id: sensor.modbus_controller
   fields:
@@ -1685,8 +2669,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_5_current_8
     name: bl0910_5_current_8
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_current_9
   component_id: sensor.modbus_controller
   fields:
@@ -1696,8 +2688,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_5_current_9
     name: bl0910_5_current_9
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_current_10
   component_id: sensor.modbus_controller
   fields:
@@ -1707,8 +2707,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_5_current_10
     name: bl0910_5_current_10
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_watt_1
   component_id: sensor.modbus_controller
   fields:
@@ -1718,8 +2726,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_5_watt_1
     name: bl0910_5_power_1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_watt_2
   component_id: sensor.modbus_controller
   fields:
@@ -1729,8 +2745,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_5_watt_2
     name: bl0910_5_power_2
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_watt_3
   component_id: sensor.modbus_controller
   fields:
@@ -1740,8 +2764,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_5_watt_3
     name: bl0910_5_power_3
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_watt_4
   component_id: sensor.modbus_controller
   fields:
@@ -1751,8 +2783,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_5_watt_4
     name: bl0910_5_power_4
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_watt_5
   component_id: sensor.modbus_controller
   fields:
@@ -1762,8 +2802,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_5_watt_5
     name: bl0910_5_power_5
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_watt_6
   component_id: sensor.modbus_controller
   fields:
@@ -1773,8 +2821,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_5_watt_6
     name: bl0910_5_power_6
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_watt_7
   component_id: sensor.modbus_controller
   fields:
@@ -1784,8 +2840,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_5_watt_7
     name: bl0910_5_power_7
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_watt_8
   component_id: sensor.modbus_controller
   fields:
@@ -1795,8 +2859,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_5_watt_8
     name: bl0910_5_power_8
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_watt_9
   component_id: sensor.modbus_controller
   fields:
@@ -1806,8 +2878,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_5_watt_9
     name: bl0910_5_power_9
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_watt_10
   component_id: sensor.modbus_controller
   fields:
@@ -1817,8 +2897,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_5_watt_10
     name: bl0910_5_power_10
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_energy_1
   component_id: sensor.modbus_controller
   fields:
@@ -1831,6 +2919,10 @@ featured_components:
     state_class: total_increasing
     id: n60_5_energy_1
     name: bl0910_5_energy_1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_energy_2
   component_id: sensor.modbus_controller
   fields:
@@ -1843,6 +2935,10 @@ featured_components:
     state_class: total_increasing
     id: n60_5_energy_2
     name: bl0910_5_energy_2
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_energy_3
   component_id: sensor.modbus_controller
   fields:
@@ -1855,6 +2951,10 @@ featured_components:
     state_class: total_increasing
     id: n60_5_energy_3
     name: bl0910_5_energy_3
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_energy_4
   component_id: sensor.modbus_controller
   fields:
@@ -1867,6 +2967,10 @@ featured_components:
     state_class: total_increasing
     id: n60_5_energy_4
     name: bl0910_5_energy_4
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_energy_5
   component_id: sensor.modbus_controller
   fields:
@@ -1879,6 +2983,10 @@ featured_components:
     state_class: total_increasing
     id: n60_5_energy_5
     name: bl0910_5_energy_5
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_energy_6
   component_id: sensor.modbus_controller
   fields:
@@ -1891,6 +2999,10 @@ featured_components:
     state_class: total_increasing
     id: n60_5_energy_6
     name: bl0910_5_energy_6
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_energy_7
   component_id: sensor.modbus_controller
   fields:
@@ -1903,6 +3015,10 @@ featured_components:
     state_class: total_increasing
     id: n60_5_energy_7
     name: bl0910_5_energy_7
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_energy_8
   component_id: sensor.modbus_controller
   fields:
@@ -1915,6 +3031,10 @@ featured_components:
     state_class: total_increasing
     id: n60_5_energy_8
     name: bl0910_5_energy_8
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_energy_9
   component_id: sensor.modbus_controller
   fields:
@@ -1927,6 +3047,10 @@ featured_components:
     state_class: total_increasing
     id: n60_5_energy_9
     name: bl0910_5_energy_9
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_energy_10
   component_id: sensor.modbus_controller
   fields:
@@ -1939,6 +3063,10 @@ featured_components:
     state_class: total_increasing
     id: n60_5_energy_10
     name: bl0910_5_energy_10
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_energy_sum
   component_id: sensor.modbus_controller
   fields:
@@ -1951,6 +3079,10 @@ featured_components:
     state_class: total_increasing
     id: n60_5_energy_sum
     name: bl0910_5_energy_sum
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_voltage
   component_id: sensor.modbus_controller
   fields:
@@ -1960,8 +3092,16 @@ featured_components:
     device_class: voltage
     accuracy_decimals: 1
     value_type: U_WORD
+    filters:
+      value:
+      - multiply: 0.01
+      locked: true
     id: n60_5_voltage
     name: bl0910_5_voltage
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_period
   component_id: sensor.modbus_controller
   fields:
@@ -1971,8 +3111,16 @@ featured_components:
     device_class: frequency
     accuracy_decimals: 1
     value_type: U_WORD
+    filters:
+      value:
+      - multiply: 0.01
+      locked: true
     id: n60_5_period
     name: bl0910_5_frequency
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_5_tps_1
   component_id: sensor.modbus_controller
   fields:
@@ -1984,6 +3132,10 @@ featured_components:
     value_type: FP32_R
     id: n60_5_tps_1
     name: bl0910_5_tps1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_current_1
   component_id: sensor.modbus_controller
   fields:
@@ -1993,8 +3145,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_6_current_1
     name: bl0910_6_current_1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_current_2
   component_id: sensor.modbus_controller
   fields:
@@ -2004,8 +3164,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_6_current_2
     name: bl0910_6_current_2
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_current_3
   component_id: sensor.modbus_controller
   fields:
@@ -2015,8 +3183,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_6_current_3
     name: bl0910_6_current_3
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_current_4
   component_id: sensor.modbus_controller
   fields:
@@ -2026,8 +3202,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_6_current_4
     name: bl0910_6_current_4
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_current_5
   component_id: sensor.modbus_controller
   fields:
@@ -2037,8 +3221,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_6_current_5
     name: bl0910_6_current_5
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_current_6
   component_id: sensor.modbus_controller
   fields:
@@ -2048,8 +3240,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_6_current_6
     name: bl0910_6_current_6
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_current_7
   component_id: sensor.modbus_controller
   fields:
@@ -2059,8 +3259,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_6_current_7
     name: bl0910_6_current_7
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_current_8
   component_id: sensor.modbus_controller
   fields:
@@ -2070,8 +3278,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_6_current_8
     name: bl0910_6_current_8
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_current_9
   component_id: sensor.modbus_controller
   fields:
@@ -2081,8 +3297,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_6_current_9
     name: bl0910_6_current_9
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_current_10
   component_id: sensor.modbus_controller
   fields:
@@ -2092,8 +3316,16 @@ featured_components:
     device_class: current
     accuracy_decimals: 3
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.001
+      locked: true
     id: n60_6_current_10
     name: bl0910_6_current_10
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_watt_1
   component_id: sensor.modbus_controller
   fields:
@@ -2103,8 +3335,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_6_watt_1
     name: bl0910_6_power_1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_watt_2
   component_id: sensor.modbus_controller
   fields:
@@ -2114,8 +3354,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_6_watt_2
     name: bl0910_6_power_2
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_watt_3
   component_id: sensor.modbus_controller
   fields:
@@ -2125,8 +3373,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_6_watt_3
     name: bl0910_6_power_3
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_watt_4
   component_id: sensor.modbus_controller
   fields:
@@ -2136,8 +3392,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_6_watt_4
     name: bl0910_6_power_4
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_watt_5
   component_id: sensor.modbus_controller
   fields:
@@ -2147,8 +3411,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_6_watt_5
     name: bl0910_6_power_5
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_watt_6
   component_id: sensor.modbus_controller
   fields:
@@ -2158,8 +3430,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_6_watt_6
     name: bl0910_6_power_6
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_watt_7
   component_id: sensor.modbus_controller
   fields:
@@ -2169,8 +3449,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_6_watt_7
     name: bl0910_6_power_7
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_watt_8
   component_id: sensor.modbus_controller
   fields:
@@ -2180,8 +3468,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_6_watt_8
     name: bl0910_6_power_8
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_watt_9
   component_id: sensor.modbus_controller
   fields:
@@ -2191,8 +3487,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_6_watt_9
     name: bl0910_6_power_9
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_watt_10
   component_id: sensor.modbus_controller
   fields:
@@ -2202,8 +3506,16 @@ featured_components:
     device_class: power
     accuracy_decimals: 1
     value_type: U_DWORD_R
+    filters:
+      value:
+      - multiply: 0.1
+      locked: true
     id: n60_6_watt_10
     name: bl0910_6_power_10
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_energy_1
   component_id: sensor.modbus_controller
   fields:
@@ -2216,6 +3528,10 @@ featured_components:
     state_class: total_increasing
     id: n60_6_energy_1
     name: bl0910_6_energy_1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_energy_2
   component_id: sensor.modbus_controller
   fields:
@@ -2228,6 +3544,10 @@ featured_components:
     state_class: total_increasing
     id: n60_6_energy_2
     name: bl0910_6_energy_2
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_energy_3
   component_id: sensor.modbus_controller
   fields:
@@ -2240,6 +3560,10 @@ featured_components:
     state_class: total_increasing
     id: n60_6_energy_3
     name: bl0910_6_energy_3
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_energy_4
   component_id: sensor.modbus_controller
   fields:
@@ -2252,6 +3576,10 @@ featured_components:
     state_class: total_increasing
     id: n60_6_energy_4
     name: bl0910_6_energy_4
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_energy_5
   component_id: sensor.modbus_controller
   fields:
@@ -2264,6 +3592,10 @@ featured_components:
     state_class: total_increasing
     id: n60_6_energy_5
     name: bl0910_6_energy_5
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_energy_6
   component_id: sensor.modbus_controller
   fields:
@@ -2276,6 +3608,10 @@ featured_components:
     state_class: total_increasing
     id: n60_6_energy_6
     name: bl0910_6_energy_6
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_energy_7
   component_id: sensor.modbus_controller
   fields:
@@ -2288,6 +3624,10 @@ featured_components:
     state_class: total_increasing
     id: n60_6_energy_7
     name: bl0910_6_energy_7
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_energy_8
   component_id: sensor.modbus_controller
   fields:
@@ -2300,6 +3640,10 @@ featured_components:
     state_class: total_increasing
     id: n60_6_energy_8
     name: bl0910_6_energy_8
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_energy_9
   component_id: sensor.modbus_controller
   fields:
@@ -2312,6 +3656,10 @@ featured_components:
     state_class: total_increasing
     id: n60_6_energy_9
     name: bl0910_6_energy_9
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_energy_10
   component_id: sensor.modbus_controller
   fields:
@@ -2324,6 +3672,10 @@ featured_components:
     state_class: total_increasing
     id: n60_6_energy_10
     name: bl0910_6_energy_10
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_energy_sum
   component_id: sensor.modbus_controller
   fields:
@@ -2336,6 +3688,10 @@ featured_components:
     state_class: total_increasing
     id: n60_6_energy_sum
     name: bl0910_6_energy_sum
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_voltage
   component_id: sensor.modbus_controller
   fields:
@@ -2345,8 +3701,16 @@ featured_components:
     device_class: voltage
     accuracy_decimals: 1
     value_type: U_WORD
+    filters:
+      value:
+      - multiply: 0.01
+      locked: true
     id: n60_6_voltage
     name: bl0910_6_voltage
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_period
   component_id: sensor.modbus_controller
   fields:
@@ -2356,8 +3720,16 @@ featured_components:
     device_class: frequency
     accuracy_decimals: 1
     value_type: U_WORD
+    filters:
+      value:
+      - multiply: 0.01
+      locked: true
     id: n60_6_period
     name: bl0910_6_frequency
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 - id: n60_6_tps_1
   component_id: sensor.modbus_controller
   fields:
@@ -2369,9 +3741,13 @@ featured_components:
     value_type: FP32_R
     id: n60_6_tps_1
     name: bl0910_6_tps1
+  requires:
+  - modbus_bus
+  - uart_bus
+  - modbus_controller_hub
 source:
   type: esphome-devices
   remote_id: KinCony-N60
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/KinCony-N60/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 69ba3172757c42b3dbb6bd35a8e5b5881af4fa364ec7f356141432c949dc9d5e

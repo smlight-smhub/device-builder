@@ -15,26 +15,60 @@ images:
 - https://raw.githubusercontent.com/esphome/devices.esphome.io/main/src/docs/devices/Gelidus-Research-Garage-Door-Opener-1/grgdo1.jpg
 - https://raw.githubusercontent.com/esphome/devices.esphome.io/main/src/docs/devices/Gelidus-Research-Garage-Door-Opener-1/grgdo1.dht22.jpg
 - https://raw.githubusercontent.com/esphome/devices.esphome.io/main/src/docs/devices/Gelidus-Research-Garage-Door-Opener-1/features.secplus.jpg
+pins:
+- gpio: 17
+  available: false
+  occupied_by: Dry contact light
+- gpio: 18
+  available: false
+  occupied_by: Dry contact open
+- gpio: 19
+  available: false
+  occupied_by: Dry contact close
 docs_url: https://devices.esphome.io/devices/Gelidus-Research-Garage-Door-Opener-1/
 featured_components:
-- id: id_prefix_dry_contact_open
+- id: grgdo1_dry_contact_open
   component_id: binary_sensor.gpio
   fields:
+    pin:
+      value:
+        number: 18
+        inverted: true
+        mode:
+          input: true
+          pullup: true
+      locked: true
     entity_category: diagnostic
-    id: id_prefix_dry_contact_open
+    id: grgdo1_dry_contact_open
     name: Dry contact open
-- id: id_prefix_dry_contact_close
+- id: grgdo1_dry_contact_close
   component_id: binary_sensor.gpio
   fields:
+    pin:
+      value:
+        number: 19
+        inverted: true
+        mode:
+          input: true
+          pullup: true
+      locked: true
     entity_category: diagnostic
-    id: id_prefix_dry_contact_close
+    id: grgdo1_dry_contact_close
     name: Dry contact close
-- id: id_prefix_dry_contact_light
+- id: grgdo1_dry_contact_light
   component_id: binary_sensor.gpio
   fields:
+    pin:
+      value:
+        number: 17
+        inverted: true
+        mode:
+          input: true
+          pullup: true
+      locked: true
     entity_category: diagnostic
     disabled_by_default: false
-    id: id_prefix_dry_contact_light
+    id: grgdo1_dry_contact_light
     name: Dry contact light
 - id: restart_button
   component_id: button.restart
@@ -58,5 +92,5 @@ source:
   type: esphome-devices
   remote_id: Gelidus-Research-Garage-Door-Opener-1
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Gelidus-Research-Garage-Door-Opener-1/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 7199ac125594dabd7c7e857b6afc8cae58bcbd2a17bb5bfd2e4982f96d58513b

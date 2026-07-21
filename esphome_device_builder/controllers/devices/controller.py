@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from esphome.core import CORE
-from esphome.helpers import write_file as atomic_write_file
 from esphome.zeroconf import AsyncEsphomeZeroconf
 
 from ...constants import is_secrets_file
@@ -35,7 +34,8 @@ from ...helpers.secrets_state import (
     wifi_secrets_defined,
     write_wifi_secrets,
 )
-from ...helpers.storage import ShutdownCallback
+from ...helpers.storage import ShutdownCallback, drain_shutdown_callbacks
+from ...helpers.yaml import write_user_yaml
 from ...models import (
     OTA_PORT,
     AddComponentResponse,
@@ -63,6 +63,7 @@ from . import (
     add_component,
     api_key,
     archive,
+    backtrace,
     firmware_sync,
     importable,
     logs,
@@ -212,6 +213,9 @@ class DevicesController(  # noqa: PLR0904 (grandfathered; new public methods nee
             is_ignored=self.state.ignored_devices.__contains__,
             presence=self._db.subscriber_presence,
             resolve_api_connection=self._resolve_device_api_connection,
+            on_persisted_ip_invalidated=self._on_persisted_ip_invalidated,
+            on_resolved_addresses_cleared=self._on_resolved_addresses_cleared,
+            on_deployed_identity_live_change=self._on_deployed_identity_live_change,
         )
         # Per-signal freshness tracker (mDNS / ping / MQTT last-seen,
         # ping RTT) feeding the device drawer's Reachability section.
@@ -220,7 +224,7 @@ class DevicesController(  # noqa: PLR0904 (grandfathered; new public methods nee
         # state monitor.
         self._reachability = ReachabilityTracker(
             on_observation=self._on_reachability_observation,
-            mdns_cache_reader=self._state_monitor.get_mdns_cache_info,
+            mdns_cache_reader=self._state_monitor.mdns.get_mdns_cache_info,
         )
         self._state_monitor.set_reachability(self._reachability)
         # MQTT routes its observations through the same state monitor so
@@ -230,6 +234,7 @@ class DevicesController(  # noqa: PLR0904 (grandfathered; new public methods nee
             get_devices=self._get_devices,
             on_state_change=lambda n, s: self._state_monitor.apply(n, s, "mqtt"),
             on_ip_change=self._state_monitor.apply_ip,
+            presence=self._db.subscriber_presence,
         )
 
     @property
@@ -242,7 +247,7 @@ class DevicesController(  # noqa: PLR0904 (grandfathered; new public methods nee
         up a second responder. ``None`` when zeroconf failed to start —
         callers skip their advertise.
         """
-        return self._state_monitor.zeroconf
+        return self._state_monitor.mdns.zeroconf
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -282,8 +287,7 @@ class DevicesController(  # noqa: PLR0904 (grandfathered; new public methods nee
         await self._build_size.stop()
         await self._mqtt_coordinator.stop()
         await self._state_monitor.stop()
-        for callback in self._shutdown_callbacks:
-            await callback()
+        await drain_shutdown_callbacks(self._shutdown_callbacks)
 
     async def poll(self) -> None:
         """Poll for file changes; a no-op once stopped (don't re-arm during shutdown)."""
@@ -356,6 +360,11 @@ class DevicesController(  # noqa: PLR0904 (grandfathered; new public methods nee
         if port is not None and port != OTA_PORT:
             return []
         return self.get_address_cache_args(configuration)
+
+    def is_thread_device(self, configuration: str) -> bool:
+        """Whether *configuration*'s device loads ``openthread`` (per its last compile)."""
+        device = self.get_by_configuration(configuration)
+        return device is not None and "openthread" in device.loaded_integrations
 
     def set_queued_update(self, configuration: str) -> bool:
         """Arm *configuration*'s queued update; True when the flag flipped."""
@@ -928,6 +937,13 @@ class DevicesController(  # noqa: PLR0904 (grandfathered; new public methods nee
             message_id=message_id,
         )
 
+    @api_command("devices/decode_backtrace")
+    async def decode_backtrace(
+        self, *, configuration: str, lines: list[str], **kwargs: Any
+    ) -> dict[str, Any]:
+        """Decode crash-region log *lines* against *configuration*'s local build."""
+        return await backtrace.decode_backtrace(self, configuration, lines)
+
     @api_command("devices/stop_stream")
     async def stop_stream(
         self,
@@ -984,9 +1000,10 @@ class DevicesController(  # noqa: PLR0904 (grandfathered; new public methods nee
         Use this for any user-editable YAML write so a mid-write
         crash can't leave the file empty or half-written;
         ``Path.write_text`` truncates before writing and isn't
-        safe for those paths.
+        safe for those paths. An existing file's mode survives the
+        rewrite (an operator-tightened ``secrets.yaml`` stays 0600).
         """
-        await run_in_executor(atomic_write_file, path, content)
+        await run_in_executor(write_user_yaml, path, content)
 
     async def _persist_yaml_mutation(
         self, configuration: str, content: str, *, message: str | None = None
@@ -1124,8 +1141,17 @@ class DevicesController(  # noqa: PLR0904 (grandfathered; new public methods nee
     def _on_ip_change(self, name: str, ip: str, addresses: list[str]) -> None:
         state_callbacks.on_ip_change(self, name, ip, addresses)
 
+    def _on_resolved_addresses_cleared(self, name: str) -> None:
+        state_callbacks.on_resolved_addresses_cleared(self, name)
+
+    def _on_persisted_ip_invalidated(self, name: str, stale_ip: str) -> None:
+        state_callbacks.on_persisted_ip_invalidated(self, name, stale_ip)
+
     def _on_source_change(self, name: str, source: ReachabilitySource) -> None:
         state_callbacks.on_source_change(self, name, source)
+
+    def _on_deployed_identity_live_change(self, name: str, *, live: bool) -> None:
+        state_callbacks.on_deployed_identity_live_change(self, name, live=live)
 
     def _on_version_change(self, name: str, version: str) -> None:
         state_callbacks.on_version_change(self, name, version)

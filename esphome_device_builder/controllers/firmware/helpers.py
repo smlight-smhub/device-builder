@@ -18,6 +18,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from esphome.upload_targets import PortType, get_port_type
+
 from ...helpers.api import CommandError
 from ...helpers.subprocess import run_subprocess_capture
 from ...models import (
@@ -46,13 +48,6 @@ from .constants import (
     _OUTPUT_TRIM_NOTICE_PREFIX,
     _PROGRESS_PATTERNS,
 )
-
-try:
-    from esphome.upload_targets import PortType, get_port_type
-except ModuleNotFoundError as exc:
-    if exc.name != "esphome.upload_targets":
-        raise
-    from ._upload_targets_fallback import PortType, get_port_type
 
 if TYPE_CHECKING:
     from ...helpers.event_bus import EventBus
@@ -148,6 +143,15 @@ def _find_esphome_cmd() -> list[str]:
     return list(_find_sibling_cli("esphome"))
 
 
+def helper_cli_cmd() -> tuple[str, ...]:
+    """Argv prefix for the ``device-builder-helper`` child.
+
+    One spelling of the name/module pair, so the download-types and
+    decode-backtrace callers can't resolve the helper differently.
+    """
+    return _find_sibling_cli("device-builder-helper", "esphome_device_builder.helper_cli")
+
+
 def _find_esptool_cmd() -> list[str]:
     """Locate the ``esptool`` CLI, preferring the same interpreter as ours.
 
@@ -189,10 +193,11 @@ def _parse_progress(line: str) -> int | None:
     """Extract a 0-100 progress percentage from a build/flash output line.
 
     Returns ``None`` when the line doesn't match one of the known
-    percent shapes (see ``_PROGRESS_PATTERNS``) or a ninja ``[N/M]``
-    counter with at least ``_NINJA_MIN_TOTAL`` steps. Stray ``%``
-    signs elsewhere in the build output (Unpacking bars, memory-usage
-    reports) are intentionally ignored.
+    percent shapes (see ``_PROGRESS_PATTERNS``). Stray ``%`` signs
+    elsewhere in the build output (Unpacking bars, memory-usage
+    reports) are intentionally ignored. Ninja ``[N/M]`` counters are
+    handled separately (:func:`_ninja_progress`) — deriving a
+    percentage from one needs per-job state.
     """
     for pattern in _PROGRESS_PATTERNS:
         match = pattern.search(line)
@@ -201,11 +206,36 @@ def _parse_progress(line: str) -> int | None:
         value = int(match.group(1))
         if 0 <= value <= 100:
             return value
+    return None
+
+
+def _parse_ninja_counter(line: str) -> tuple[int, int] | None:
+    """Extract ``(done, total)`` from a ninja ``[N/M]`` counter line, else ``None``."""
     if match := _NINJA_PROGRESS_PATTERN.match(line):
         done, total = int(match.group(1)), int(match.group(2))
-        if total >= _NINJA_MIN_TOTAL and done <= total:
-            return done * 100 // total
+        if done <= total:
+            return done, total
     return None
+
+
+def _ninja_progress(job: FirmwareJob, line: str) -> int | None:
+    """
+    Derive a 0-100 percentage from a ninja ``[N/M]`` counter line.
+
+    Only the largest total seen this run drives the gauge: an
+    ExternalProject sub-build (the esp-idf bootloader, 123 steps on
+    IDF 5.x) streams its own counter through the same output, and its
+    ``[N/N]`` final step would otherwise latch 100% mid-build. The
+    ``_NINJA_MIN_TOTAL`` floor drops tiny sub-steps (``[1/2]
+    Re-running CMake...``) that arrive before any real total registers.
+    """
+    if (counter := _parse_ninja_counter(line)) is None:
+        return None
+    done, total = counter
+    if total < _NINJA_MIN_TOTAL or total < job.ninja_total:
+        return None
+    job.ninja_total = total
+    return done * 100 // total
 
 
 def _validate_upload_target(port: str, *, bootloader: bool) -> None:
@@ -368,9 +398,17 @@ def _ingest_output_line(job: FirmwareJob, bus: EventBus, line: str) -> None:
     bus.fire(EventType.JOB_OUTPUT, out_payload)
     _stamp_compile_phase(job, line)
     progress = _parse_progress(line)
+    if progress is None:
+        progress = _ninja_progress(job, line)
     if progress is None or progress <= (job.progress or 0):
         return
     _fire_job_progress(job, bus, progress)
+
+
+def _ingest_notice_line(job: FirmwareJob, bus: EventBus, text: str) -> None:
+    """Ingest a synthetic ``*** text ***`` line, separating it from an unterminated tail."""
+    prefix = "\n" if job.output and not job.output[-1].endswith(("\n", "\r")) else ""
+    _ingest_output_line(job, bus, f"{prefix}*** {text} ***\n")
 
 
 def _is_compile_start_line(line: str) -> bool:
@@ -394,12 +432,15 @@ def _stamp_compile_phase(job: FirmwareJob, line: str) -> None:
     """
     Stamp the compile-phase wall-clocks off *line*.
 
-    Start on the first build line and end on the summary banner, so the span
-    excludes the download and, for an install, the flash. ANSI is stripped
-    first — the ``[SUCCESS] Took`` banner colours *inside* the brackets. Runs
-    per streamed line, so it short-circuits once both stamps are latched (an
-    install flashes long after the compile ends) and pre-filters the end scan
-    on a plain-text substring before paying for the ANSI strip + regex.
+    Start on the first build line and end on the summary banner (pio) or, for
+    native esp-idf, esphome's ``Successfully compiled program`` line — ninja's
+    ``build stopped`` closer on failure — so the span excludes the download
+    and, for an install, the flash. ANSI is
+    stripped first — the ``[SUCCESS] Took`` banner colours *inside* the
+    brackets. Runs per streamed line, so it short-circuits once both stamps
+    are latched (an install flashes long after the compile ends) and
+    pre-filters the end scan on plain-text substrings before paying for the
+    ANSI strip + regex.
     """
     if job.compile_ended_at is not None:
         return
@@ -407,9 +448,12 @@ def _stamp_compile_phase(job: FirmwareJob, line: str) -> None:
         if _is_compile_start_line(_ANSI_ESCAPE.sub("", line)):
             job.compile_started_at = _now_iso()
         return
-    # ``Took `` is plain text in the banner (only the [SUCCESS]/[FAILED] token
-    # carries inline ANSI), so this skips the strip + regex on every other line.
-    if "Took " in line and _COMPILE_END_PATTERN.search(_ANSI_ESCAPE.sub("", line)):
+    # Every end marker carries a plain-text token (the banner colours only the
+    # [SUCCESS]/[FAILED] word; the INFO line is wrapped, not interleaved), so
+    # this skips the strip + regex on every other line.
+    if (
+        "Took " in line or "Successfully compiled" in line or "build stopped" in line
+    ) and _COMPILE_END_PATTERN.search(_ANSI_ESCAPE.sub("", line)):
         job.compile_ended_at = _now_iso()
 
 

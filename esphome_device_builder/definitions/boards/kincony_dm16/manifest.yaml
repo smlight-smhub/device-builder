@@ -40,6 +40,12 @@ pins:
   occupied_by: Ethernet RESET
 docs_url: https://devices.esphome.io/devices/KinCony-DM16/
 featured_components:
+- id: ads1115_hub
+  component_id: ads1115
+  fields:
+    address: 72
+  requires:
+  - bus_a
 - id: bus_a
   component_id: i2c
   fields:
@@ -332,102 +338,6 @@ featured_components:
   requires:
   - bus_a
   - pcf8574_hub_in_1
-- id: light_monochromatic_1
-  component_id: light.monochromatic
-  fields:
-    default_transition_length: 0s
-    id: light_monochromatic_1
-    name: DAC CH1
-- id: light_monochromatic_2
-  component_id: light.monochromatic
-  fields:
-    default_transition_length: 0s
-    id: light_monochromatic_2
-    name: DAC CH2
-- id: light_monochromatic_3
-  component_id: light.monochromatic
-  fields:
-    default_transition_length: 0s
-    id: light_monochromatic_3
-    name: DAC CH3
-- id: light_monochromatic_4
-  component_id: light.monochromatic
-  fields:
-    default_transition_length: 0s
-    id: light_monochromatic_4
-    name: DAC CH4
-- id: light_monochromatic_5
-  component_id: light.monochromatic
-  fields:
-    default_transition_length: 0s
-    id: light_monochromatic_5
-    name: DAC CH5
-- id: light_monochromatic_6
-  component_id: light.monochromatic
-  fields:
-    default_transition_length: 0s
-    id: light_monochromatic_6
-    name: DAC CH6
-- id: light_monochromatic_7
-  component_id: light.monochromatic
-  fields:
-    default_transition_length: 0s
-    id: light_monochromatic_7
-    name: DAC CH7
-- id: light_monochromatic_8
-  component_id: light.monochromatic
-  fields:
-    default_transition_length: 0s
-    id: light_monochromatic_8
-    name: DAC CH8
-- id: light_monochromatic_9
-  component_id: light.monochromatic
-  fields:
-    default_transition_length: 0s
-    id: light_monochromatic_9
-    name: DAC CH9
-- id: light_monochromatic_10
-  component_id: light.monochromatic
-  fields:
-    default_transition_length: 0s
-    id: light_monochromatic_10
-    name: DAC CH10
-- id: light_monochromatic_11
-  component_id: light.monochromatic
-  fields:
-    default_transition_length: 0s
-    id: light_monochromatic_11
-    name: DAC CH11
-- id: light_monochromatic_12
-  component_id: light.monochromatic
-  fields:
-    default_transition_length: 0s
-    id: light_monochromatic_12
-    name: DAC CH12
-- id: light_monochromatic_13
-  component_id: light.monochromatic
-  fields:
-    default_transition_length: 0s
-    id: light_monochromatic_13
-    name: DAC CH13
-- id: light_monochromatic_14
-  component_id: light.monochromatic
-  fields:
-    default_transition_length: 0s
-    id: light_monochromatic_14
-    name: DAC CH14
-- id: light_monochromatic_15
-  component_id: light.monochromatic
-  fields:
-    default_transition_length: 0s
-    id: light_monochromatic_15
-    name: DAC CH15
-- id: light_monochromatic_16
-  component_id: light.monochromatic
-  fields:
-    default_transition_length: 0s
-    id: light_monochromatic_16
-    name: DAC CH16
 - id: sensor_ads1115_1
   component_id: sensor.ads1115
   fields:
@@ -437,6 +347,9 @@ featured_components:
     update_interval: 5s
     id: sensor_ads1115_1
     name: ADS1115 Channel A0-GND
+  requires:
+  - bus_a
+  - ads1115_hub
 - id: sensor_ads1115_2
   component_id: sensor.ads1115
   fields:
@@ -445,6 +358,9 @@ featured_components:
     update_interval: 5s
     id: sensor_ads1115_2
     name: ADS1115 Channel A1-GND
+  requires:
+  - bus_a
+  - ads1115_hub
 - id: sensor_ads1115_3
   component_id: sensor.ads1115
   fields:
@@ -453,6 +369,9 @@ featured_components:
     update_interval: 5s
     id: sensor_ads1115_3
     name: ADS1115 Channel A2-GND
+  requires:
+  - bus_a
+  - ads1115_hub
 - id: sensor_ads1115_4
   component_id: sensor.ads1115
   fields:
@@ -461,9 +380,12 @@ featured_components:
     update_interval: 5s
     id: sensor_ads1115_4
     name: ADS1115 Channel A3-GND
+  requires:
+  - bus_a
+  - ads1115_hub
 source:
   type: esphome-devices
   remote_id: KinCony-DM16
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/KinCony-DM16/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 716181281df1844805aa6fb878c0f92ed5c9f87865cffbe8de4a643b3caf2f57

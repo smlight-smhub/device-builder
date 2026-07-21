@@ -19,16 +19,40 @@ lookup) reach into a stable surface.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import TYPE_CHECKING
+
+from zeroconf import Zeroconf
 
 from ...helpers.api import CommandError
 from ...helpers.async_ import drain_tasks
 from ...models import ErrorCode, PeerStatus, StoredPairing
 from ._models import PeerLinkClientHandle
+from .display_identity import dashboard_display_identity
 from .peer_link_client import PeerLinkClient
 
 if TYPE_CHECKING:
     from .offloader import OffloaderController
+
+
+def _zeroconf_getter(controller: OffloaderController) -> Callable[[], Zeroconf | None]:
+    """Return a lazy reader for the shared inner sync ``Zeroconf``."""
+
+    def _get() -> Zeroconf | None:
+        devices = controller._db.devices
+        aiozc = devices.zeroconf if devices is not None else None
+        return aiozc.zeroconf if aiozc is not None else None
+
+    return _get
+
+
+def _display_identity_getter(controller: OffloaderController) -> Callable[[], tuple[str, bool]]:
+    """Return a lazy reader for this offloader's ``(friendly_name, ha_addon)``."""
+
+    def _get() -> tuple[str, bool]:
+        return dashboard_display_identity(controller._db)
+
+    return _get
 
 
 def spawn_peer_link_client(controller: OffloaderController, pairing: StoredPairing) -> None:
@@ -66,6 +90,12 @@ def spawn_peer_link_client(controller: OffloaderController, pairing: StoredPairi
         receiver_label=pairing.label,
         bus=controller._db.bus,
         resolver=controller.state.peer_link_resolver,
+        # Same shared zeroconf the resolver rides; read lazily so a
+        # zeroconf that comes up (or goes away) after spawn is honoured
+        # on the next reconnect wait. The listener API lives on the
+        # inner sync ``Zeroconf``, not the ``AsyncZeroconf`` wrapper.
+        get_zeroconf=_zeroconf_getter(controller),
+        get_display_identity=_display_identity_getter(controller),
     )
     task = asyncio.create_task(
         client.run(),

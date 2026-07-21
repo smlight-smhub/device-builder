@@ -1,12 +1,13 @@
 """
 Atomic filesystem writes for dashboard-internal artefacts.
 
-For cert / key / token / metadata-sidecar files. User-editable
-YAML still goes through :func:`esphome.helpers.write_file`.
+For cert / key / token / metadata-sidecar files, plus the
+mode-preserving rewrite of user-editable YAML.
 
 Why not the upstream helper here: ``write_file``'s ``private``
 flag is binary (0o644 vs 0o600), and we need arbitrary modes for
-caller-controlled-mode shapes (cert / key + future token stores).
+caller-controlled-mode shapes (cert / key + future token stores)
+and for keeping an operator-set mode across a rewrite.
 
 Blocking I/O — call from ``run_in_executor``, not the loop.
 """
@@ -14,9 +15,12 @@ Blocking I/O — call from ``run_in_executor``, not the loop.
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
+import stat
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 # Windows raises ``PermissionError`` (WinError 5) on both sides of a
@@ -29,6 +33,9 @@ from pathlib import Path
 # before we give up — far cheaper than losing a metadata / preferences write
 # or failing a concurrent read.
 _IS_WINDOWS = os.name == "nt"
+# ``os.link`` failures that mean "this filesystem can't hard-link"
+# (SMB / FAT / some FUSE mounts) rather than a real error.
+_HARDLINK_UNSUPPORTED_ERRNOS = frozenset({errno.EPERM, errno.EOPNOTSUPP, errno.ENOSYS})
 _REPLACE_RETRIES = 15
 _REPLACE_RETRY_BACKOFF_S = 0.05
 _REPLACE_RETRY_BACKOFF_CAP_S = 0.5
@@ -50,6 +57,60 @@ def atomic_write(
     """
     if make_parents:
         path.parent.mkdir(parents=True, exist_ok=True)
+    _staged_write(path, data, mode=mode, publish=_replace_with_retry)
+
+
+def atomic_write_preserving_mode(path: Path, data: bytes, *, default_mode: int = 0o644) -> None:
+    """
+    Atomically write *data*, keeping an existing *path*'s permission bits.
+
+    A rewrite must not reset an operator-tightened mode (e.g. a 0600
+    ``secrets.yaml``) back to world-readable; a missing (or unstatable)
+    *path* gets *default_mode*.
+    """
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        mode = default_mode
+    atomic_write(path, data, mode=mode)
+
+
+def atomic_write_exclusive(path: Path, data: bytes, *, mode: int = 0o644) -> None:
+    """
+    Write *data* to *path* atomically; ``FileExistsError`` when it exists.
+
+    Stages like :func:`atomic_write`, then publishes with an exclusive
+    primitive — ``os.link`` on POSIX, ``os.rename`` on Windows — both
+    of which refuse an existing target. The target only ever appears
+    fully written (a crash mid-write leaves no partial file) and a
+    concurrent creator loses cleanly with ``FileExistsError``. On a
+    hardlink-less POSIX filesystem (SMB / FAT) the publish degrades to
+    a direct exclusive write: still no-clobber, but a crash mid-write
+    can leave a partial target on that one mount class.
+    """
+    _staged_write(path, data, mode=mode, publish=_publish_exclusive)
+
+
+def read_bytes_with_retry(path: Path) -> bytes:
+    """Read *path*'s bytes, retried on a Windows handle race with a concurrent replace."""
+    return _retry_windows_permission(path.read_bytes)
+
+
+def _staged_write(
+    path: Path,
+    data: bytes,
+    *,
+    mode: int | None,
+    publish: Callable[[Path, Path], None],
+) -> None:
+    """
+    Stage *data* in a sibling tempfile, then hand it to *publish*.
+
+    *publish* moves or links the staged file onto *path*; the staged
+    tempfile is cleaned up afterwards either way (a suppressed no-op
+    when the publish consumed it). Readers of *path* only ever see a
+    fully written file.
+    """
     fd, tmp_str = tempfile.mkstemp(
         prefix=path.name + ".",
         suffix=".tmp",
@@ -70,40 +131,60 @@ def atomic_write(
             if mode is not None:
                 tmp_path.chmod(mode)
             fh.write(data)
-        _replace_with_retry(tmp_path, path)
-    except Exception:
-        # Suppress all OSError on cleanup so the original write
-        # failure isn't masked by a secondary unlink permission
-        # error.
+        publish(tmp_path, path)
+    finally:
+        # Suppress all OSError on cleanup so a write failure isn't
+        # masked by a secondary unlink permission error.
         with contextlib.suppress(OSError):
             tmp_path.unlink()
-        raise
 
 
-def read_bytes_with_retry(path: Path) -> bytes:
-    """Read *path*'s bytes, retried on a Windows handle race with a concurrent replace."""
-    for attempt in range(_REPLACE_RETRIES):
+def _publish_exclusive(src: Path, dst: Path) -> None:
+    """Exclusive publish: refuses an existing *dst* with ``FileExistsError``."""
+    if not _IS_WINDOWS:
+        # ``os.link`` is the POSIX exclusive primitive; the staged
+        # source is unlinked by the caller's cleanup.
         try:
-            return path.read_bytes()
-        except PermissionError:
-            # POSIX never hits this transiently, so a PermissionError there is
-            # real; re-raise. On Windows, back off and retry the open.
-            if not _IS_WINDOWS or attempt == _REPLACE_RETRIES - 1:
+            os.link(src, dst)
+        except FileExistsError:
+            raise
+        except OSError as err:
+            if err.errno not in _HARDLINK_UNSUPPORTED_ERRNOS:
                 raise
-            time.sleep(min(_REPLACE_RETRY_BACKOFF_S * 2**attempt, _REPLACE_RETRY_BACKOFF_CAP_S))
-    raise AssertionError("unreachable: loop returns or raises")  # pragma: no cover
+        else:
+            return
+        # Hardlink-less filesystem: keep the exclusive-open reach the
+        # pre-staged write had, at the cost of unstaged bytes on this
+        # one exotic mount class. Mirror the staged file's mode; a
+        # fresh ``open("xb")`` would otherwise take the umask default.
+        with dst.open("xb") as f:
+            f.write(src.read_bytes())
+        dst.chmod(stat.S_IMODE(src.stat().st_mode))
+        return
+    # ``Path.rename`` on Windows refuses an existing destination
+    # (``FileExistsError``, surfaced immediately, not a
+    # ``PermissionError``); a transient hold by an AV / indexer gets
+    # the shared retry policy.
+    _retry_windows_permission(lambda: src.rename(dst))
 
 
 def _replace_with_retry(src: Path, dst: Path) -> None:
     """``Path.replace`` *src* onto *dst*, retried on a Windows handle race."""
+    _retry_windows_permission(lambda: src.replace(dst))
+
+
+def _retry_windows_permission[T](op: Callable[[], T]) -> T:
+    """
+    Run *op*, retrying a transient Windows ``PermissionError`` with backoff.
+
+    POSIX never hits the transient class, so a ``PermissionError``
+    there is real and surfaces without a retry.
+    """
     for attempt in range(_REPLACE_RETRIES):
         try:
-            src.replace(dst)
+            return op()
         except PermissionError:
-            # POSIX rename can't hit this transiently, so a PermissionError
-            # there is real; re-raise. On Windows, back off and retry.
             if not _IS_WINDOWS or attempt == _REPLACE_RETRIES - 1:
                 raise
             time.sleep(min(_REPLACE_RETRY_BACKOFF_S * 2**attempt, _REPLACE_RETRY_BACKOFF_CAP_S))
-        else:
-            return
+    raise AssertionError("unreachable: loop returns or raises")  # pragma: no cover

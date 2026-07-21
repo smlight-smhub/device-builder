@@ -63,13 +63,14 @@ from typing import TYPE_CHECKING, Any, cast
 
 from ...helpers.async_ import run_in_executor
 from ...helpers.lazy_module import async_import_module
+from ...helpers.paths import PathEscapeError, resolve_under_root
 from ...helpers.peer_link_bundle import (
     BundleAssembler,
     BundleAssemblerError,
     BundleAssemblerErrorCode,
     decode_chunk,
 )
-from ...helpers.peer_link_frames import frame_schema, is_valid_frame
+from ...helpers.peer_link_frames import frame_schema, is_valid_frame, safe_job_id
 from ...helpers.remote_build_layout import REMOTE_BUILDS_SUBDIR, RemoteBuildPath
 from ...helpers.version_compat import coerce_pep440_version
 from ...models import (
@@ -104,6 +105,7 @@ _REASON_JOB_ID_MISMATCH = "job_id_mismatch"
 _REASON_CHUNK_DECODE_FAILED = "chunk_decode_failed"
 _REASON_EXTRACT_FAILED = "extract_failed"
 _REASON_QUEUE_REJECTED = "queue_rejected"
+_REASON_UPLOAD_UNSUPPORTED = "upload_unsupported"
 
 # Cap on the peer-controlled display strings the header carries
 # (``device_name`` / ``device_friendly_name``). The schema gate
@@ -165,7 +167,7 @@ _SUBMIT_JOB_CHUNK_SCHEMA = frame_schema(
 # construction failure.
 #
 # ``target="clean"`` rides the same submit_job pipeline as
-# compile / upload — receiver re-extracts the YAML to the
+# compile — receiver re-extracts the YAML to the
 # per-offloader subtree, then runs ``esphome clean`` against it,
 # which wipes ``<data_dir>/build/<device_name>/``. The receiver's
 # 6c TTL sweep eventually reclaims the subtree itself; an
@@ -174,9 +176,10 @@ _SUBMIT_JOB_CHUNK_SCHEMA = frame_schema(
 # clean to every connected peer when the operator clicks "Clean
 # build files" so receivers that have built this device locally
 # also drop their stale artifacts.
+# ``target="upload"`` is deliberately absent — rejected with
+# ``upload_unsupported`` in :meth:`SubmitJobReceiver.handle_submit_job`.
 _TARGET_TO_JOB_TYPE: dict[str, JobType] = {
     "compile": JobType.COMPILE,
-    "upload": JobType.UPLOAD,
     "clean": JobType.CLEAN,
 }
 
@@ -358,6 +361,10 @@ class SubmitJobReceiver:
         self._firmware = firmware_controller
         self._inflight: dict[str, _PendingSubmit] = {}
 
+    def has_any_inflight(self) -> bool:
+        """Whether any offloader has a bundle mid-upload (the reset busy gate)."""
+        return bool(self._inflight)
+
     def discard_session(self, dashboard_id: str) -> None:
         """Drop any in-flight submit state for *dashboard_id*.
 
@@ -378,8 +385,9 @@ class SubmitJobReceiver:
           flight on the same session.
         * Header field shapes the wire-format TypedDict can't
           enforce at runtime (target outside the
-          ``compile`` / ``upload`` set, malformed
-          ``configuration_filename``).
+          ``compile`` / ``clean`` set, malformed
+          ``configuration_filename``), plus the explicit
+          ``upload_unsupported`` reject.
         * Assembler-construction validation (oversized total,
           empty bundle, etc.) — these come from the announced
           header values, so they map to a ``submit_job_ack``
@@ -398,10 +406,9 @@ class SubmitJobReceiver:
         # method operates on after the gate.
         raw = cast(dict[str, Any], frame)
         if not is_valid_frame(_SUBMIT_JOB_HEADER_SCHEMA, raw):
-            job_id = raw.get("job_id") if isinstance(raw.get("job_id"), str) else ""
             await self._reject(
                 session,
-                job_id=cast(str, job_id),
+                job_id=safe_job_id(raw),
                 reason=_REASON_INVALID_HEADER,
                 terminate_session=True,
             )
@@ -410,6 +417,11 @@ class SubmitJobReceiver:
             await self._reject(session, job_id=frame["job_id"], reason=_REASON_DUPLICATE_SUBMIT)
             return
         target = frame["target"]
+        if target == "upload":
+            # Distinct from ``invalid_header`` so an older offloader's
+            # dialog surfaces a recognisable refusal, not "bad frame".
+            await self._reject(session, job_id=frame["job_id"], reason=_REASON_UPLOAD_UNSUPPORTED)
+            return
         if target not in _TARGET_TO_JOB_TYPE:
             await self._reject(session, job_id=frame["job_id"], reason=_REASON_INVALID_HEADER)
             return
@@ -470,10 +482,9 @@ class SubmitJobReceiver:
         # and terminate.
         chunk_dict = cast(dict[str, Any], frame)
         if not is_valid_frame(_SUBMIT_JOB_CHUNK_SCHEMA, chunk_dict):
-            job_id = chunk_dict.get("job_id") if isinstance(chunk_dict.get("job_id"), str) else ""
             await self._reject(
                 session,
-                job_id=cast(str, job_id),
+                job_id=safe_job_id(chunk_dict),
                 reason=_REASON_INVALID_CHUNK,
                 drop_inflight=True,
                 terminate_session=True,
@@ -619,7 +630,10 @@ class SubmitJobReceiver:
                 self._config_dir,
                 prepare,
             )
-        except _PathEscapeError as exc:
+        except PathEscapeError as exc:
+            # Wire-shape problem (traversal via ``configuration_filename``
+            # / ``dashboard_id``), not a receiver-side I/O failure — maps
+            # to ``invalid_header``, distinct from ``extract_failed``.
             _LOGGER.warning(
                 "submit_job from %s: target_dir %s escaped remote-builds root; rejecting",
                 session.dashboard_id,
@@ -752,20 +766,6 @@ class _SubmitJobRejectionError(Exception):
         self.reason = reason
 
 
-class _PathEscapeError(Exception):
-    """*target_dir* resolved outside the remote-builds root.
-
-    Surfaced from :func:`_validate_write_extract_bundle` so the
-    caller can map to a typed
-    :class:`SubmitJobAckFrameData.reason` of ``invalid_header``.
-    Distinct from the ``EsphomeError`` / ``OSError`` paths
-    (which surface as ``extract_failed``) because this is a
-    wire-shape problem — the offloader's ``configuration_filename``
-    or its captured ``dashboard_id`` carries a path-traversal
-    shape — not a receiver-side I/O failure.
-    """
-
-
 def _validate_write_extract_bundle(
     bundle_path: Path,
     bundle_bytes: bytes,
@@ -796,24 +796,18 @@ def _validate_write_extract_bundle(
     (#678) still produces an absolute-vs-absolute
     ``relative_to`` pair.
 
-    Raises :class:`_PathEscapeError` on the path-escape branch
+    Raises :class:`PathEscapeError` on the path-escape branch
     so the caller can distinguish "bad input shape" from
     "extract failed". Raises
     :class:`esphome.bundle.EsphomeError` / :class:`OSError`
     untouched for the extract / write paths.
     """
-    # Resolve-and-stay-under-root. ``Path.resolve()`` normalises
-    # ``..`` / symlinks; ``relative_to`` raises ``ValueError``
-    # when the result climbs outside the remote-builds root.
     # The upstream filename validator catches separator / ``..``
     # in ``configuration_filename`` upfront, but ``dashboard_id``
     # flows through unvalidated from the Noise handshake /
     # receiver-side registration; this gate catches anything an
     # exotic ``dashboard_id`` shape would slip past.
-    try:
-        target_dir.resolve().relative_to(remote_builds_root.resolve())
-    except ValueError as exc:
-        raise _PathEscapeError(str(target_dir)) from exc
+    resolve_under_root(target_dir, remote_builds_root)
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
     bundle_path.write_bytes(bundle_bytes)
     extracted: Path = prepare_bundle_for_compile(bundle_path, target_dir)

@@ -759,6 +759,10 @@ featured_components:
     update_interval: 5s
     unit_of_measurement: mA
     attenuation: 11db
+    filters:
+      value:
+      - multiply: 6.66666666
+      locked: true
     id: sensor_adc_3
     name: t32m A3 Current
 - id: sensor_adc_4
@@ -770,6 +774,10 @@ featured_components:
     update_interval: 5s
     unit_of_measurement: mA
     attenuation: 11db
+    filters:
+      value:
+      - multiply: 6.66666666
+      locked: true
     id: sensor_adc_4
     name: t32m A4 Current
 - id: t32m_output01
@@ -1256,5 +1264,5 @@ source:
   type: esphome-devices
   remote_id: KinCony-T32M
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/KinCony-T32M/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: ffb701fa33369d57689712a967bb3262a2934f05a60fb2097af48283aa140df2

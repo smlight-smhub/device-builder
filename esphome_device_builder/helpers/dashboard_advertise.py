@@ -89,7 +89,7 @@ _REFRESH_INTERVAL_SECONDS = 300
 _UNREGISTER_TIMEOUT = 1.0
 
 
-def _default_friendly_name() -> str:
+def default_friendly_name() -> str:
     """
     Best-effort friendly label for the dashboard host.
 
@@ -308,6 +308,7 @@ class DashboardAdvertiser:
         name: str | None = None,
         hostname: str | None = None,
         dashboard_id: str | None = None,
+        on_ha_addon: bool = False,
     ) -> None:
         """
         Capture the static fields used in the published ``ServiceInfo``.
@@ -340,8 +341,12 @@ class DashboardAdvertiser:
         main HTTP port (``port`` arg) so the existing browse path
         for general dashboard discovery isn't broken. ``None`` when
         the listener isn't bound (default-off shape).
+
+        ``on_ha_addon`` tags the broadcast as the HA add-on so peers
+        can label it (e.g. "Home Assistant") instead of the opaque
+        container hostname.
         """
-        friendly = (name or "").strip() or _default_friendly_name()
+        friendly = (name or "").strip() or default_friendly_name()
         explicit_host = (hostname or "").strip()
         host = explicit_host or build_mdns_hostname(dashboard_id=dashboard_id or "")
         self._port = int(port)
@@ -354,6 +359,7 @@ class DashboardAdvertiser:
         self._esphome_version = esphome_version
         self._pin_sha256 = pin_sha256
         self._remote_build_port = remote_build_port
+        self._ha_addon = on_ha_addon
         self._info: ServiceInfo | None = None
         self._zeroconf: AsyncEsphomeZeroconf | None = None
         # Background tick that calls :meth:`refresh` on
@@ -367,6 +373,26 @@ class DashboardAdvertiser:
     def service_type(self) -> str:
         """The mDNS service type this advertiser publishes under."""
         return SERVICE_TYPE
+
+    @property
+    def hostname(self) -> str:
+        """The advertised SRV target hostname (e.g. ``esphome-builder-abc.local``)."""
+        return self._hostname
+
+    @property
+    def friendly_name(self) -> str:
+        """The human machine label published as the ``friendly_name`` TXT entry."""
+        return self._friendly_name
+
+    @property
+    def on_ha_addon(self) -> bool:
+        """True when the broadcast is tagged as the HA add-on."""
+        return self._ha_addon
+
+    @property
+    def addresses(self) -> list[str]:
+        """The A/AAAA addresses in the current advertise; ``[]`` before register."""
+        return self._info.parsed_addresses() if self._info is not None else []
 
     @property
     def registered(self) -> bool:
@@ -479,6 +505,8 @@ class DashboardAdvertiser:
             properties["pin_sha256"] = self._pin_sha256
         if self._remote_build_port is not None:
             properties["remote_build_port"] = str(self._remote_build_port)
+        if self._ha_addon:
+            properties["ha_addon"] = "1"
         # ``server`` is the SRV record's target. Zeroconf appends
         # ``.local.`` if missing; pass it through as-is.
         server = self._hostname if self._hostname.endswith(".") else f"{self._hostname}."

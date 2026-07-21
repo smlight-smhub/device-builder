@@ -11,6 +11,21 @@ images:
 - https://raw.githubusercontent.com/esphome/devices.esphome.io/main/src/docs/devices/Moes-edm-03aa-eu/moes-dimmer.jpg
 docs_url: https://devices.esphome.io/devices/Moes-edm-03aa-eu/
 featured_components:
+- id: uart_bus
+  component_id: uart
+  fields:
+    rx_pin:
+      value: RX1
+      locked: true
+    tx_pin:
+      value: TX1
+      locked: true
+    baud_rate: 115200
+- id: tuya_hub
+  component_id: tuya
+  fields: {}
+  requires:
+  - uart_bus
 - id: light_tuya_1
   component_id: light.tuya
   fields:
@@ -20,6 +35,9 @@ featured_components:
     max_value: 1000
     id: light_tuya_1
     name: Wall Dimmer
+  requires:
+  - uart_bus
+  - tuya_hub
 - id: min_brightness
   component_id: number.tuya
   fields:
@@ -30,23 +48,12 @@ featured_components:
     entity_category: config
     id: min_brightness
     name: Min Brightness
-- id: load_type
-  component_id: select.tuya
-  fields:
-    enum_datapoint: 4
-    entity_category: config
-    id: load_type
-    name: Load Type
-- id: indicator_led
-  component_id: select.tuya
-  fields:
-    enum_datapoint: 21
-    entity_category: config
-    id: indicator_led
-    name: Indicator LED
+  requires:
+  - uart_bus
+  - tuya_hub
 source:
   type: esphome-devices
   remote_id: Moes-edm-03aa-eu
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Moes-edm-03aa-eu/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: e921fb945aa1ea7a1f15e1b008379bcd774a6ed81a803f8265a195822828c895

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from esphome.storage_json import StorageJSON
 
+from ...helpers.async_ import run_in_executor
 from ...helpers.config_hash import compute_yaml_config_hash
 from ...helpers.event_bus import Event
 from ...helpers.remote_build_layout import (
@@ -25,6 +26,13 @@ _LOGGER = logging.getLogger(__name__)
 # Delay before the post-flash Native-API version re-probe so the device
 # has time to reboot into the new image before we connect.
 _POST_FLASH_VERSION_REPROBE_DELAY = 60
+
+# A deep-sleep device is only awake briefly after the reboot, so the single
+# 60s probe above would miss it. Fire a tight burst on this cadence across the
+# reboot + awake window instead; each tick is a no-op once the device is
+# re-seen over mDNS.
+_DEEP_SLEEP_REPROBE_INTERVAL = 5
+_DEEP_SLEEP_REPROBE_WINDOW = 40
 
 
 def on_job_completed(controller: DevicesController, event: Event[JobLifecycleData]) -> None:
@@ -137,7 +145,8 @@ async def persist_expected_config_hash(controller: DevicesController, configurat
     malformed ``build_info.json`` so an upstream ESPHome
     shape change surfaces visibly.
     """
-    yaml_path = controller._db.settings.rel_path(configuration)
+    # ``rel_path`` resolves symlinks (blocking ``os.path.abspath``) — executor.
+    yaml_path = await run_in_executor(controller._db.settings.rel_path, configuration)
     new_hash = await compute_yaml_config_hash(yaml_path)
     if not new_hash:
         _LOGGER.warning(
@@ -176,25 +185,47 @@ async def sync_deployed_state_after_flash(
     version = await asyncio.to_thread(_read_compiled_esphome_version, configuration)
     if version:
         controller._state_monitor.apply_version(device.name, version)
+    # First-party evidence: the flash this dashboard just performed
+    # backs the pinned identity even where no mDNS broadcast can reach
+    # us — the mDNS-dark case the clear paths deliberately never
+    # demote. The monitor refuses the stamp for an mdns-owned api
+    # device, where the announce vouches instead.
+    controller._state_monitor.apply_deployed_identity_live(device.name, live=True)
 
 
 def schedule_version_reprobe(controller: DevicesController, configuration: str) -> None:
     """
-    Arm a one-shot Native-API version re-probe ~60s after a flash.
+    Arm the post-flash Native-API version re-probe(s).
 
-    The delay lets the device reboot into the new image before we
-    connect; the re-probe then confirms the optimistically-pinned
-    version (and catches a rollback) where mDNS can't reach us.
-    Re-arming for the same configuration cancels the prior timer so a
-    rapid re-flash doesn't stack probes; the handle is tracked on the
-    controller so ``stop`` can cancel anything still pending.
+    A normal device gets one probe ~60s after the flash, letting it
+    reboot into the new image before we connect. A deep-sleep device
+    (``Device.uses_deep_sleep``) is only awake briefly, so it gets a
+    tight burst across the reboot + awake window (each tick a no-op once
+    the device is re-seen over mDNS). Either way the re-probe confirms
+    the optimistically-pinned version (and catches a rollback) where
+    mDNS can't reach us. Re-arming for the same configuration cancels the
+    prior timer so a rapid re-flash doesn't stack probes; the handle is
+    tracked on the controller so ``stop`` can cancel anything still
+    pending.
     """
     existing = controller._reprobe_timers.pop(configuration, None)
     if existing is not None:
         existing.cancel()
+    device = controller._scanner.get_by_configuration(configuration)
     loop = asyncio.get_running_loop()
+    delay: float
+    deadline: float | None
+    interval: float | None
+    if device is not None and device.uses_deep_sleep:
+        # A deep-sleep device is only awake briefly; probe on the burst cadence,
+        # re-arming until the awake-window deadline passes.
+        delay = interval = _DEEP_SLEEP_REPROBE_INTERVAL
+        deadline = loop.time() + _DEEP_SLEEP_REPROBE_WINDOW
+    else:
+        delay = _POST_FLASH_VERSION_REPROBE_DELAY
+        interval = deadline = None
     controller._reprobe_timers[configuration] = loop.call_later(
-        _POST_FLASH_VERSION_REPROBE_DELAY, _fire_version_reprobe, controller, configuration
+        delay, _fire_version_reprobe, controller, configuration, deadline, interval
     )
 
 
@@ -212,21 +243,51 @@ async def migrate_metadata_then_scan(
             old_configuration,
             new_configuration,
         )
+    # The renamed YAML was written before the migration (at queue time on
+    # the OTA path), so a poll scan has usually already indexed it
+    # label-less; force a reload so the migrated sidecar reaches RAM.
+    await controller._scanner.reload(new_configuration)
     await controller._scanner.scan()
 
 
-def _fire_version_reprobe(controller: DevicesController, configuration: str) -> None:
+def _fire_version_reprobe(
+    controller: DevicesController,
+    configuration: str,
+    deadline: float | None = None,
+    interval: float | None = None,
+) -> None:
     """
     Timer callback: ask the monitor to verify the device's running version.
 
-    A no-op if the device vanished in the interim. The request still
-    honours the monitor's ``priority_for != MDNS`` guard, so a device
-    already seen over mDNS by now is skipped rather than probed.
+    A no-op if the device vanished. ``request_reprobe`` honours the
+    monitor's ``priority_for != MDNS`` guard, so a device already seen
+    fresh over mDNS is skipped. When *deadline* / *interval* are given (a
+    deep-sleep device's brief awake window), re-arm every *interval*
+    until the deadline passes, since one probe would miss the window. It
+    deliberately does not short-circuit on the device's ONLINE state,
+    which right after a flash is the stale pre-reboot reading.
+
+    What bounds the reprobe count: each tick force-requests a probe,
+    which intentionally bypasses the api-info failure cooldown so a
+    still-rebooting device isn't backed off past its wake. The *deadline*
+    (not the cooldown) is the bound, to ~``window / interval`` probes.
+    ``request_reprobe`` keys a set, so repeated ticks don't stack; the
+    monitor's mDNS-ownership gate turns the remaining ticks into no-ops
+    once the device re-announces; and the api-info sweep serialises and
+    caps probes, so this never fans out into concurrent dials.
     """
     controller._reprobe_timers.pop(configuration, None)
     device = controller._scanner.get_by_configuration(configuration)
-    if device is not None:
-        controller._state_monitor.request_version_reprobe(device.name)
+    if device is None:
+        return
+    controller._state_monitor.api_info.request_reprobe(device.name)
+    if deadline is None or interval is None:
+        return
+    loop = asyncio.get_running_loop()
+    if loop.time() + interval <= deadline:
+        controller._reprobe_timers[configuration] = loop.call_later(
+            interval, _fire_version_reprobe, controller, configuration, deadline, interval
+        )
 
 
 def _read_compiled_esphome_version(configuration: str) -> str:

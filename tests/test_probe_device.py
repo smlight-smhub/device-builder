@@ -1,5 +1,5 @@
 """
-Tests for ``DeviceStateMonitor.probe_device``.
+Tests for ``MdnsSource.probe_device``.
 
 Adoption / wizard / on-disk YAML drops all need an eager mDNS
 probe so the new device card lands fully populated (IP, version,
@@ -21,7 +21,6 @@ from esphome_device_builder.controllers._device_state_monitor import (
     DeviceStateMonitor,
 )
 from esphome_device_builder.controllers._device_state_monitor._state import MonitorState
-from esphome_device_builder.controllers._device_state_monitor.importable import ImportableDiscovery
 from esphome_device_builder.controllers._device_state_monitor.mdns import MdnsSource
 from esphome_device_builder.controllers._device_state_monitor.ping import PingSource
 from esphome_device_builder.models import Device, DeviceRuntimeState, DeviceState
@@ -34,14 +33,12 @@ def _make_monitor() -> DeviceStateMonitor:
 
     monitor.state = MonitorState()
 
-    monitor._importable = ImportableDiscovery(monitor)
+    monitor.mdns = MdnsSource(monitor)
 
-    monitor._mdns = MdnsSource(monitor)
-
-    monitor._presence = None
-    monitor._ping = PingSource(monitor)
-    monitor._mdns._zeroconf = MagicMock()
-    monitor._mdns._zeroconf.zeroconf = MagicMock()
+    monitor.presence = None
+    monitor.ping = PingSource(monitor)
+    monitor.mdns._zeroconf = MagicMock()
+    monitor.mdns._zeroconf.zeroconf = MagicMock()
     monitor._tasks = set()
     monitor.state.reachability = None
     return monitor
@@ -66,7 +63,7 @@ def _capture_apply(
     def _apply(name: str, info: Any) -> None:
         calls.append((name, info))
 
-    monkeypatch.setattr(monitor._mdns, "_apply_service_info", _apply)
+    monkeypatch.setattr(monitor.mdns, "_apply_service_info", _apply)
     return calls
 
 
@@ -78,11 +75,11 @@ async def test_probe_device_cache_hit_applies_synchronously(monkeypatch) -> None
     fake_info = MagicMock()
     fake_info.load_from_cache.return_value = True
     monkeypatch.setattr(
-        "esphome_device_builder.controllers._device_state_monitor.importable.AsyncServiceInfo",
+        "esphome_device_builder.controllers._device_state_monitor.mdns.AsyncServiceInfo",
         lambda *_args, **_kw: fake_info,
     )
 
-    monitor.probe_device("kitchen")
+    monitor.mdns.probe_device("kitchen")
 
     assert apply_calls == [("kitchen", fake_info)]
     assert not monitor._tasks
@@ -109,11 +106,11 @@ async def test_probe_device_uses_service_name_when_provided(monkeypatch) -> None
         return fake_info
 
     monkeypatch.setattr(
-        "esphome_device_builder.controllers._device_state_monitor.importable.AsyncServiceInfo",
+        "esphome_device_builder.controllers._device_state_monitor.mdns.AsyncServiceInfo",
         _info_ctor,
     )
 
-    monitor.probe_device("my-living-room", service_name="apollo-r-pro-1-eth-5938e0")
+    monitor.mdns.probe_device("my-living-room", service_name="apollo-r-pro-1-eth-5938e0")
 
     # Looked up under the OLD broadcast name…
     assert constructor_args == [
@@ -131,16 +128,16 @@ async def test_probe_device_cache_miss_spawns_task(monkeypatch) -> None:
     fake_info = MagicMock()
     fake_info.load_from_cache.return_value = False
     monkeypatch.setattr(
-        "esphome_device_builder.controllers._device_state_monitor.importable.AsyncServiceInfo",
+        "esphome_device_builder.controllers._device_state_monitor.mdns.AsyncServiceInfo",
         lambda *_args, **_kw: fake_info,
     )
 
     async def fake_resolve(*_args, **_kw) -> None:
         return None
 
-    monkeypatch.setattr(monitor._mdns, "_resolve_and_apply", fake_resolve)
+    monkeypatch.setattr(monitor.mdns, "resolve_then", fake_resolve)
 
-    monitor.probe_device("kitchen")
+    monitor.mdns.probe_device("kitchen")
 
     assert apply_calls == []
     # One task was registered for tracking. Wait it out so the
@@ -156,16 +153,14 @@ def test_probe_device_no_zeroconf_is_a_noop() -> None:
 
     monitor.state = MonitorState()
 
-    monitor._importable = ImportableDiscovery(monitor)
+    monitor.mdns = MdnsSource(monitor)
 
-    monitor._mdns = MdnsSource(monitor)
-
-    monitor._presence = None
-    monitor._ping = PingSource(monitor)
-    monitor._mdns._zeroconf = None
+    monitor.presence = None
+    monitor.ping = PingSource(monitor)
+    monitor.mdns._zeroconf = None
     monitor._tasks = set()
 
-    monitor.probe_device("kitchen")  # no exception, no tasks
+    monitor.mdns.probe_device("kitchen")  # no exception, no tasks
     assert not monitor._tasks
 
 
@@ -202,7 +197,7 @@ async def test_apply_service_info_claims_online() -> None:
     fake_info = MagicMock()
     fake_info.parsed_scoped_addresses.return_value = []
     fake_info.decoded_properties = {}
-    monitor._mdns._apply_service_info("kitchen", fake_info)
+    monitor.mdns._apply_service_info("kitchen", fake_info)
 
     # ``_on_state_change`` is the bridge our owner registered for
     # state transitions; the call carries (name, state, source).
@@ -249,7 +244,7 @@ async def test_apply_service_info_routes_mac_txt_to_apply_mac_address() -> None:
     # the canonical form because ``apply_mac_address`` normalizes
     # before invoking the change callback.
     fake_info.decoded_properties = {"mac": "94c9601f8cf1"}
-    monitor._mdns._apply_service_info("kitchen", fake_info)
+    monitor.mdns._apply_service_info("kitchen", fake_info)
 
     assert callbacks.calls_for("on_mac_address_change") == [
         ("on_mac_address_change", "kitchen", "94:C9:60:1F:8C:F1")

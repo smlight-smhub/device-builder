@@ -18,7 +18,7 @@ tags:
 pins:
 - gpio: 1
   available: false
-  occupied_by: Button
+  occupied_by: Shelly Plus 1 Mini Button
 - gpio: 3
   available: false
   occupied_by: temp_analog_reading
@@ -27,7 +27,7 @@ pins:
   occupied_by: relay_output
 - gpio: 10
   available: false
-  occupied_by: Switch
+  occupied_by: Shelly Plus 1 Mini Switch
 docs_url: https://devices.esphome.io/devices/Shelly-Plus-1-Mini/
 featured_components:
 - id: binary_sensor_gpio_1
@@ -36,8 +36,12 @@ featured_components:
     pin:
       value: 10
       locked: true
+    filters:
+      value:
+      - delayed_on_off: 50ms
+      locked: true
     id: binary_sensor_gpio_1
-    name: Switch
+    name: Shelly Plus 1 Mini Switch
 - id: binary_sensor_gpio_2
   component_id: binary_sensor.gpio
   fields:
@@ -49,8 +53,12 @@ featured_components:
           input: true
           pullup: true
       locked: true
+    filters:
+      value:
+      - delayed_on_off: 5ms
+      locked: true
     id: binary_sensor_gpio_2
-    name: Button
+    name: Shelly Plus 1 Mini Button
 - id: relay_output
   component_id: output.gpio
   fields:
@@ -58,15 +66,6 @@ featured_components:
       value: 7
       locked: true
     id: relay_output
-- id: sensor_ntc_1
-  component_id: sensor.ntc
-  fields:
-    unit_of_measurement: °C
-    accuracy_decimals: 1
-    icon: mdi:thermometer
-    sensor: temp_resistance_reading
-    id: sensor_ntc_1
-    name: Temperature
 - id: temp_resistance_reading
   component_id: sensor.resistance
   fields:
@@ -89,20 +88,15 @@ featured_components:
   fields:
     output: relay_output
     id: relay
-    name: Relay
+    name: Shelly Plus 1 Mini Relay
 featured_bundles:
-- id: sensor_ntc_1_setup
-  name: Temperature (full setup)
-  component_ids:
-  - temp_resistance_reading
-  - sensor_ntc_1
 - id: temp_resistance_reading_setup
   name: temp_resistance_reading (full setup)
   component_ids:
   - temp_analog_reading
   - temp_resistance_reading
 - id: relay_setup
-  name: Relay (full setup)
+  name: Shelly Plus 1 Mini Relay (full setup)
   component_ids:
   - relay_output
   - relay
@@ -110,5 +104,5 @@ source:
   type: esphome-devices
   remote_id: Shelly-Plus-1-Mini
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Shelly-Plus-1-Mini/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 35ef4da155e50482e0d46e414f515a1ef6cd02883f6227f2ca6f462d85b683b7

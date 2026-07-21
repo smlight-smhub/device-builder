@@ -26,7 +26,7 @@ featured_components:
     cold_white: cw_color_temp
     warm_white: ww_color_temp
     id: light_cwww_1
-    name: Cwww 1
+    name: Connect SmartHome CSH-E27WW10W
 - id: cw_color_temp
   component_id: output.esp8266_pwm
   fields:
@@ -43,7 +43,7 @@ featured_components:
     id: ww_color_temp
 featured_bundles:
 - id: light_cwww_1_setup
-  name: Cwww (full setup)
+  name: Connect SmartHome CSH-E27WW10W (full setup)
   component_ids:
   - cw_color_temp
   - ww_color_temp
@@ -52,5 +52,5 @@ source:
   type: esphome-devices
   remote_id: Connect-SmartHome-10W-CCT-Bulb-CSH-E27WW10W
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Connect-SmartHome-10W-CCT-Bulb-CSH-E27WW10W/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: c6abeb64d955137000b7d7198daf0a7fd258222a7ec69830ce723e1b8e8b2abd

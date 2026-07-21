@@ -17,6 +17,7 @@ import logging
 import sys
 from collections.abc import Iterator
 from contextlib import AbstractAsyncContextManager
+from operator import attrgetter
 from typing import TYPE_CHECKING, Any
 
 from esphome.const import __version__ as _installed_esphome_version
@@ -60,6 +61,7 @@ from .helpers import (
     _validate_upload_target,
     _verify_esphome_importable,
 )
+from .persistence import job_dict_without_output
 
 if TYPE_CHECKING:
     from ...device_builder import DeviceBuilder
@@ -70,18 +72,19 @@ _LOGGER = logging.getLogger(__name__)
 
 class FirmwareController:  # noqa: PLR0904 (grandfathered; new public methods need a refactor first)
     """
-    Manage firmware build jobs with a persistent two-lane queue.
+    Manage firmware build jobs with a persistent three-lane queue.
 
-    A compile lane (CPU) and an upload lane (network) each run one job at a
-    time but run concurrently, so a slow upload doesn't block the next
-    compile. Jobs are persisted to disk so they survive page refreshes and
-    server restarts. Progress is broadcast via the event bus to all
-    connected clients.
+    A compile lane (CPU, one job at a time), an upload lane (network, up
+    to ``MAX_CONCURRENT_UPLOADS`` flashes at once), and a single-slot
+    OpenThread upload lane run concurrently, so a slow upload doesn't
+    block the next compile or flash. Jobs are persisted to disk so they
+    survive page refreshes and server restarts. Progress is broadcast via
+    the event bus to all connected clients.
     """
 
     def __init__(self, device_builder: DeviceBuilder) -> None:
         self._db = device_builder
-        self.state = FirmwareState()
+        self.state = FirmwareState(is_thread_configuration=self._is_thread_configuration)
         # Short-lived capability tokens for the HTTP artifact-download route.
         self.download_tokens = download_mod.DownloadTokens()
         self._runner_task: asyncio.Task | None = None
@@ -179,7 +182,7 @@ class FirmwareController:  # noqa: PLR0904 (grandfathered; new public methods ne
         runner's ``queue.get``, so a scheduler reading only ``running``
         would misclassify a loaded lane as accepting more work.
         """
-        running = lane.current_job is not None
+        running = bool(lane.active)
         queue_depth = lane.queue.qsize()
         idle = not running and queue_depth == 0
         return QueueStatus(idle=idle, running=running, queue_depth=queue_depth)
@@ -449,6 +452,13 @@ class FirmwareController:  # noqa: PLR0904 (grandfathered; new public methods ne
     ) -> None:
         await follow.follow_job(self, job_id=job_id, client=client, message_id=message_id)
 
+    def jobs_snapshot(self) -> list[dict]:
+        """Serialise the retained job set (``created_at`` order, ``output`` dropped)."""
+        return [
+            job_dict_without_output(job)
+            for job in sorted(self.state.jobs.values(), key=attrgetter("created_at"))
+        ]
+
     @api_command("firmware/follow_jobs")
     async def follow_jobs(
         self,
@@ -499,19 +509,21 @@ class FirmwareController:  # noqa: PLR0904 (grandfathered; new public methods ne
     # ------------------------------------------------------------------
 
     async def _run_queue(self) -> None:
-        """Run both lane consumers + the remote-dispatch loop; drain all on any exit.
+        """Run every lane worker + the remote-dispatch loop; drain all on any exit.
 
-        On shutdown-cancel or one task raising, cancel and await all three
+        Each lane gets ``max_concurrency`` workers sharing its queue. On
+        shutdown-cancel or one task raising, cancel and await them all
         before the error propagates — else a sibling is left orphaned
         mid-flight (subprocess not terminated, job not finalised). The
         remote-dispatch loop never returns on its own; cancelling it
         detaches its bus listeners.
         """
         queue_tasks = [
-            create_eager_task(runner.run_lane(self, self.state.compile_lane)),
-            create_eager_task(runner.run_lane(self, self.state.upload_lane)),
-            create_eager_task(remote_dispatch.run_dispatch_loop(self)),
+            create_eager_task(runner.run_lane(self, lane))
+            for lane in self.state.lanes()
+            for _ in range(lane.max_concurrency)
         ]
+        queue_tasks.append(create_eager_task(remote_dispatch.run_dispatch_loop(self)))
         try:
             await asyncio.gather(*queue_tasks)
         finally:
@@ -580,9 +592,9 @@ class FirmwareController:  # noqa: PLR0904 (grandfathered; new public methods ne
         await runner.execute_remote_job(self, job)
 
     def _tracked_subprocess(
-        self, lane: Lane, *args: Any, **kwargs: Any
+        self, job: FirmwareJob, *args: Any, **kwargs: Any
     ) -> AbstractAsyncContextManager[asyncio.subprocess.Process]:
-        return runner.tracked_subprocess(self, lane, *args, **kwargs)
+        return runner.tracked_subprocess(self, job, *args, **kwargs)
 
     def _finalize_terminal(
         self, job: FirmwareJob, status: JobStatus, *, error: str | None = None
@@ -592,11 +604,21 @@ class FirmwareController:  # noqa: PLR0904 (grandfathered; new public methods ne
     def _finalize_cancelled(self, job: FirmwareJob) -> None:
         lifecycle.finalize_cancelled(self, job)
 
-    async def _terminate_current_process(self, lane: Lane) -> None:
-        await lifecycle.terminate_current_process(self, lane)
+    def _is_thread_configuration(self, configuration: str) -> bool:
+        devices = self._db.devices
+        if devices is None:
+            _LOGGER.warning(
+                "Devices controller unavailable; %s flashes without thread serialization",
+                configuration,
+            )
+            return False
+        return devices.is_thread_device(configuration)
 
-    async def _verify_chip(self, job: FirmwareJob, lane: Lane) -> None:
-        await cli.verify_chip(self, job, lane)
+    async def _terminate_job_process(self, job: FirmwareJob) -> None:
+        await lifecycle.terminate_job_process(self, job)
+
+    async def _verify_chip(self, job: FirmwareJob) -> None:
+        await cli.verify_chip(self, job)
 
     def _compose_subprocess_env(self, job: FirmwareJob) -> dict[str, str]:
         return cli.compose_subprocess_env(job)
@@ -642,7 +664,10 @@ class FirmwareController:  # noqa: PLR0904 (grandfathered; new public methods ne
                     f"no provisioner available to build esphome {version} "
                     "(receiver stopping?); refusing to compile with the installed version"
                 )
-            return await provisioner.provision(version)
+            return await provisioner.provision(
+                version,
+                on_build=lambda line: _ingest_output_line(job, self._db.bus, line),
+            )
         if job.job_type is JobType.CLEAN:
             if provisioner is not None and (cached := await provisioner.cached_cmd(version)):
                 return cached

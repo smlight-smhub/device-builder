@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from typing import TYPE_CHECKING
 
 from icmplib import async_ping as icmp_ping
 from icmplib.exceptions import ICMPLibError
 
+from ...helpers.async_ import log_gather_failures
 from ...helpers.hostname import is_local_hostname
 from ...models import Device, DeviceState
 from . import shared
+from ._sweep_source import SweepSource
 from .helpers import _pick_ipv4
 
 if TYPE_CHECKING:
@@ -24,18 +25,6 @@ _LOGGER = logging.getLogger(__name__)
 def _format_devices(devices: list[Device]) -> str:
     """Render *devices* as ``"name (address), …"`` for log messages."""
     return ", ".join(f"{d.name} ({d.address})" for d in devices)
-
-
-_PING_INTERVAL = 60  # seconds between ping sweeps
-# Bootstrap delay gives the mDNS browser a head start so the
-# common case (everything announces) skips a redundant ping the
-# browser would have flipped ONLINE for free. 10s mirrors the
-# upstream dashboard's ``MDNS_BOOTSTRAP_TIME``.
-_PING_BOOTSTRAP_DELAY = 10
-# icmplib gets unreliable past a few dozen concurrent probes;
-# 24 matches the upstream ``GROUP_SIZE`` and keeps each batch
-# inside a single ICMP timeout window.
-_PING_BATCH_SIZE = 24
 
 
 async def _can_use_icmp_lib_with_privilege() -> bool | None:
@@ -58,33 +47,70 @@ async def _can_use_icmp_lib_with_privilege() -> bool | None:
     return True
 
 
-class PingSource:
-    """ICMP ping loop owning the periodic sweep and the wake-on-add early trigger."""
+class PingSource(SweepSource):
+    """ICMP ping sweep: mDNS pre-resolve, target selection, and the ping pass."""
+
+    _label = "ICMP ping sweep"
+    # The mDNS browser's head start so the common case (everything
+    # announces) skips a redundant ping the browser would have flipped
+    # ONLINE for free. 10s mirrors the upstream dashboard's
+    # ``MDNS_BOOTSTRAP_TIME``.
+    _bootstrap_delay = 10
 
     def __init__(self, monitor: DeviceStateMonitor) -> None:
-        self._monitor = monitor
-        # Cleared at the top of each sweep so a wake fired mid-sweep
-        # still triggers the next idle.
-        self._wake = asyncio.Event()
-        self._concurrency = asyncio.Semaphore(_PING_BATCH_SIZE)
+        super().__init__(monitor)
+        # One in-flight budget for every ICMP consumer — the sweep and
+        # the reviver's pre-filter share it so overlapping loops can't
+        # exceed the icmplib reliability bound together.
+        self.icmp_concurrency = asyncio.Semaphore(shared.ICMP_BATCH_SIZE)
         # Sorted ``(name, address)`` of every device in the union of
         # the last DEBUG sweep's pingable + dns_failed buckets. Spanning
         # both keeps the signature stable across the DNS-failure cache
         # flicker (120s TTL vs 60s sweep) so the line only re-emits on
         # real membership change.
         self._last_logged_targets: tuple[tuple[str, str], ...] = ()
-        # Set in ``run`` once the privilege probe lands; the pre-
+        # Set in ``_prepare`` once the privilege probe lands; the pre-
         # ``run`` default is only seen by tests that mock ``icmp_ping``.
         self._privileged: bool = True
-        # 0→1 multiplexed into the same wake event so a subscriber
-        # arriving mid-idle gets fresh ICMP without waiting out the
-        # rest of the interval.
-        if monitor._presence is not None:
-            monitor._presence.add_subscriber_callback(self._wake.set)
+        # Privilege-probe outcome for siblings (the API reviver gates
+        # on it): True once some ICMP socket mode works and the sweep
+        # is running.
+        self.icmp_available: bool = False
 
-    async def run(self) -> None:
-        await asyncio.sleep(_PING_BOOTSTRAP_DELAY)
+    async def ping_once(self, target: str, *, retry: bool) -> float | None:
+        """
+        ICMP *target* once; RTT in ms when alive, ``None`` when unreachable.
+
+        Any failure mode reads as unreachable — ``NameLookupError``,
+        ``NoRouteToHost``, ``PermissionError``, socket-open failures
+        all mean "we tried and couldn't reach this". *retry* re-probes
+        a miss with multiple packets so a single dropped ICMP doesn't
+        read as dead on lossy paths (VPN, congested Wi-Fi). Callers
+        hold ``icmp_concurrency`` — the probe itself doesn't acquire
+        it (the sweep holds one slot across resolve + ping).
+        """
+        privileged = self._privileged
+        try:
+            result = await icmp_ping(target, count=1, timeout=3, privileged=privileged)
+            if not result.is_alive and retry:
+                result = await icmp_ping(
+                    target, count=3, interval=0.5, timeout=2, privileged=privileged
+                )
+            # ``Host.min_rtt`` is 0.0 on a failed ping which would
+            # surface as "0 ms" in the drawer — gate the capture
+            # on ``is_alive`` so failures stay null instead.
+            if result.is_alive:
+                return float(result.min_rtt)
+        except (ICMPLibError, OSError) as exc:
+            # ``.local`` hosts on systems without Avahi / mdnsd
+            # hit this every sweep; one-line debug avoids
+            # flooding the logs with stack traces.
+            _LOGGER.debug("Ping of %s failed: %s", target, exc)
+        return None
+
+    async def _prepare(self) -> bool:
         privileged = await _can_use_icmp_lib_with_privilege()
+        self.icmp_available = privileged is not None
         if privileged is None:
             _LOGGER.warning(
                 "ICMP ping sweep disabled: opening an ICMP socket was denied in both "
@@ -92,32 +118,23 @@ class PingSource:
                 "net.ipv4.ping_group_range covering this process's group); "
                 "device state will only update via mDNS"
             )
-            return
+            return False
         self._privileged = privileged
         _LOGGER.debug("Using icmplib in privileged=%s mode for the ICMP ping sweep", privileged)
-        # Strict pause when wired to a SubscriberPresence gate: only
-        # sweep while at least one dashboard client is subscribed,
-        # so a quiet network with no observers generates no ICMP
-        # traffic. The 0→1 transition wakes the loop immediately
-        # via ``wait_for_subscriber`` — mDNS keeps running
-        # unconditionally because it's passive.
-        monitor = self._monitor
-        while True:
-            if monitor._presence is not None:
-                await monitor._presence.wait_for_subscriber()
-            self._wake.clear()
-            await shared.resolve_non_api_mdns_targets(monitor)
-            await self._ping_sweep()
-            await self._idle()
+        return True
 
-    def wake(self) -> None:
-        """Bail the idle wait so the next sweep runs without waiting on ``_PING_INTERVAL``."""
-        self._wake.set()
-
-    async def _idle(self) -> None:
-        """Sleep up to ``_PING_INTERVAL`` or until the wake event fires."""
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(self._wake.wait(), timeout=_PING_INTERVAL)
+    async def _sweep(self) -> None:
+        # Disjoint candidate sets — resolve both concurrently so a
+        # wire-miss in one doesn't delay the sweep behind the other.
+        # A failing resolve step is logged and must not skip the
+        # sibling resolve or the ping pass for this interval.
+        results = await asyncio.gather(
+            shared.resolve_non_api_mdns_targets(self._monitor),
+            shared.resolve_api_mdns_targets(self._monitor),
+            return_exceptions=True,
+        )
+        log_gather_failures(results, "mDNS resolve step failed; continuing")
+        await self._ping_sweep()
 
     async def _ping_sweep(self) -> None:
         pingable, dns_failed = self._select_ping_targets()
@@ -144,43 +161,58 @@ class PingSource:
                     _LOGGER.debug(
                         "Pinging %d devices: %s", len(pingable), _format_devices(pingable)
                     )
-        # ``self._concurrency`` semaphore caps in-flight ICMP at
-        # ``_PING_BATCH_SIZE``; no need to pre-chunk the gather.
-        await asyncio.gather(
-            *(self._resolve_and_ping(device) for device in pingable),
-            return_exceptions=True,
-        )
+        # The worker count caps this sweep's own fan-out (no parked
+        # Task per device); ``self.icmp_concurrency`` stays acquired
+        # per probe because it is the *cross-consumer* budget — the
+        # reviver's pre-filter holds the same semaphore, so a
+        # concurrent sweep + reviver still total ICMP_BATCH_SIZE.
+        # Workers share one iterator; a per-device failure is logged
+        # and the worker moves on.
+        iterator = iter(pingable)
+
+        async def _drain() -> None:
+            for device in iterator:
+                try:
+                    await self._resolve_and_ping(device)
+                except Exception:
+                    _LOGGER.warning(
+                        "Ping pass failed for %s; continuing", device.name, exc_info=True
+                    )
+
+        workers = min(shared.ICMP_BATCH_SIZE, len(pingable))
+        await asyncio.gather(*(_drain() for _ in range(workers)))
 
     def _select_ping_targets(self) -> tuple[list[Device], list[Device]]:
         """Return ``(pingable, dns_failed)`` and apply per-device side-effects."""
         pingable: list[Device] = []
         dns_failed: list[Device] = []
+        seen: set[tuple[str, str]] = set()
         monitor = self._monitor
+        live_ptrs = monitor.mdns.live_ptr_service_names()
         for device in monitor._get_devices():
-            if not device.address or not shared.should_ping(monitor, device):
+            if not device.address or not shared.should_ping(monitor, device, live_ptrs):
                 continue
-            if is_local_hostname(device.address) and monitor.get_cached_addresses(device.address):
-                # zeroconf has this ``.local`` host in its mDNS cache. Ping it
-                # (``_resolve_and_ping`` resolves, then falls back to the cached
-                # address) rather than claiming ONLINE off cache presence: a
-                # stale or reflected cache entry for a dead device would
-                # otherwise latch it ONLINE forever, since ``mdns`` priority
-                # locks out the sweep and there is no browser ``Removed`` for a
-                # cache-only claim (#1776). Routed here ahead of the DNS-failure
-                # branch so a cached lookup failure can't strand a device we
-                # still hold an mDNS address for.
-                pingable.append(device)
+            key = (device.name, device.address)
+            if key in seen:
+                # Duplicate-name YAMLs share one broadcast; the apply
+                # path fans a probe's result out to the whole name
+                # bucket, so a second probe of the same pair is pure
+                # duplicate packets.
                 continue
-            if monitor.state.dns_cache.has_cached_failure(device.address) and (
-                not device.runtime_state.ip_addresses
-            ):
-                # The ``.local`` won't resolve and we have no known IP.
+            seen.add(key)
+            if shared.sweep_has_no_target(monitor, device):
+                # The address won't resolve and we have no known IP.
                 # Don't hand the bare hostname to icmplib (it would hammer
                 # the system resolver every sweep). Apply OFFLINE under the
                 # ``ping`` source so a future successful resolve can flip
-                # the device back. A device with a known IP (e.g. from MQTT)
-                # falls through to ``pingable`` and is pinged at that IP.
-                monitor.apply(device.name, DeviceState.OFFLINE, "ping")
+                # the device back. Everything else falls through to
+                # ``pingable``: a zeroconf-cached ``.local`` gets *pinged*
+                # rather than claimed ONLINE off cache presence (a stale or
+                # reflected entry for a dead device would latch it ONLINE
+                # forever, #1776), and a device with a known IP (e.g. from
+                # MQTT) is pinged at that IP. One predicate, shared with
+                # the reviver's cohort gate.
+                shared.apply_ping_result(monitor, device.name, None)
                 dns_failed.append(device)
                 continue
             pingable.append(device)
@@ -189,7 +221,7 @@ class PingSource:
     async def _resolve_and_ping(self, device: Device) -> None:
         """Resolve *device.address* through the DNS cache and ICMP it."""
         monitor = self._monitor
-        async with self._concurrency:
+        async with self.icmp_concurrency:
             addresses = await monitor.state.dns_cache.async_resolve(device.address)
             if not addresses and is_local_hostname(device.address):
                 # System resolver couldn't resolve the ``.local`` (no nss-mdns
@@ -197,14 +229,14 @@ class PingSource:
                 # cache, kept fresh by the ``AsyncServiceBrowser``, rather than
                 # giving up — but ping still decides liveness, so a stale or
                 # reflected entry demotes instead of latching ONLINE (#1776).
-                addresses = monitor.get_cached_addresses(device.address)
+                addresses = monitor.mdns.get_cached_addresses(device.address)
             if not addresses:
                 # mDNS-less devices: the ``.local`` won't resolve but a
                 # prior MQTT/DNS observation left a usable IP. Ping that so
                 # ping can confirm a device the network won't resolve.
                 addresses = list(device.runtime_state.ip_addresses)
             if not addresses:
-                monitor.apply(device.name, DeviceState.OFFLINE, "ping")
+                shared.apply_ping_result(monitor, device.name, None)
                 return
             # Ping the IPv4 primary, not ``addresses[0]`` — a resolve/cache
             # hit can order a scoped IPv6 first even when an IPv4 is present,
@@ -222,13 +254,6 @@ class PingSource:
             await self._ping_device(device, target)
 
     async def _ping_device(self, device: Device, target: str) -> None:
-        # Any failure mode flips OFFLINE rather than staying
-        # UNKNOWN — ``NameLookupError``, ``NoRouteToHost``,
-        # ``PermissionError``, socket-open failures all mean
-        # "we tried and couldn't reach this". A subsequent
-        # successful ping flips it back to ONLINE.
-        monitor = self._monitor
-        rtt_ms: float | None = None
         # Skip the retry only for already-OFFLINE devices: the miss
         # just confirms the state, nothing to flap. ONLINE devices
         # get the retry to absorb a transient drop; UNKNOWN devices
@@ -237,30 +262,5 @@ class PingSource:
         # immediately label a reachable device OFFLINE on a single
         # dropped packet.
         needs_retry = device.runtime_state.state is not DeviceState.OFFLINE
-        privileged = self._privileged
-        try:
-            result = await icmp_ping(target, count=1, timeout=3, privileged=privileged)
-            is_alive = result.is_alive
-            if not is_alive and needs_retry:
-                # Retry with multiple packets before flapping the
-                # indicator. A single dropped ICMP would otherwise
-                # flap on lossy paths (VPN, congested Wi-Fi).
-                result = await icmp_ping(
-                    target, count=3, interval=0.5, timeout=2, privileged=privileged
-                )
-                is_alive = result.is_alive
-            # ``Host.min_rtt`` is 0.0 on a failed ping which would
-            # surface as "0 ms" in the drawer — gate the capture
-            # on ``is_alive`` so failures stay null instead.
-            if is_alive:
-                rtt_ms = float(result.min_rtt)
-        except (ICMPLibError, OSError) as exc:
-            # ``.local`` hosts on systems without Avahi / mdnsd
-            # hit this every sweep; one-line debug avoids
-            # flooding the logs with stack traces.
-            _LOGGER.debug("Ping of %s (%s) failed: %s", device.name, target, exc)
-            is_alive = False
-        new_state = DeviceState.ONLINE if is_alive else DeviceState.OFFLINE
-        if is_alive and rtt_ms is not None and monitor.state.reachability is not None:
-            monitor.state.reachability.record_ping_rtt(device.name, rtt_ms)
-        monitor.apply(device.name, new_state, "ping")
+        rtt_ms = await self.ping_once(target, retry=needs_retry)
+        shared.apply_ping_result(self._monitor, device.name, rtt_ms)

@@ -34,7 +34,7 @@ featured_components:
     blue: pwm_b
     white: pwm_w
     id: light_rgbw_1
-    name: Rgbw 1
+    name: Shelly Bulb Duo RGBW
 - id: pwm_r
   component_id: output.esp8266_pwm
   fields:
@@ -69,7 +69,7 @@ featured_components:
     id: pwm_w
 featured_bundles:
 - id: light_rgbw_1_setup
-  name: Rgbw (full setup)
+  name: Shelly Bulb Duo RGBW (full setup)
   component_ids:
   - pwm_r
   - pwm_g
@@ -80,5 +80,5 @@ source:
   type: esphome-devices
   remote_id: Shelly-Bulb-Duo-RGBW
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Shelly-Bulb-Duo-RGBW/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 4b29f48d668f018fdd114835bf12fdad1d2cbdb30c6d58b47ade09cb743d95f5

@@ -58,7 +58,6 @@ from esphome_device_builder.models import (
     JobStatus,
 )
 
-from .conftest import HAS_NATIVE_IDF_TOOLCHAIN
 from .conftest import make_peer_link_session as _make_session
 
 # ---------------------------------------------------------------------------
@@ -631,9 +630,6 @@ def test_pack_build_artifacts_raises_when_pio_platformio_ini_missing(tmp_path: P
         pack_build_artifacts("kitchen.yaml")
 
 
-@pytest.mark.skipif(
-    not HAS_NATIVE_IDF_TOOLCHAIN, reason="esphome lacks the native ESP-IDF toolchain (< 2026.5.0)"
-)
 def test_pack_build_artifacts_native_idf_omits_pio_metadata(tmp_path: Path) -> None:
     """Native ESP-IDF (no platformio.ini / idedata) packs storage + build/ files, no PIO members."""
     _write_receiver_state(
@@ -969,7 +965,7 @@ def test_unpack_artifacts_response_directory_entry_raises() -> None:
         dir_info.type = tarfile.DIRTYPE
         tar.addfile(dir_info)
 
-    with pytest.raises(UnpackArtifactsError, match="non-file tarball entry"):
+    with pytest.raises(UnpackArtifactsError, match="is not a regular file"):
         unpack_artifacts_response(
             DownloadArtifactsResult(tarball=buf.getvalue(), firmware_offset="0x0"),
             job_id="j",
@@ -1169,8 +1165,7 @@ def test_read_artifacts_tarball_rejects_cumulative_size_over_cap(
     """
     # Patch the cap to a tiny value so the test stays cheap.
     monkeypatch.setattr(
-        "esphome_device_builder.controllers.remote_build.artifacts_tarball."
-        "FIRMWARE_MAX_TOTAL_BYTES",
+        "esphome_device_builder.helpers.tarball_read.FIRMWARE_MAX_TOTAL_BYTES",
         128,
     )
     members = {
@@ -1189,8 +1184,7 @@ def test_read_artifacts_tarball_rejects_per_member_size_over_cap(
 ) -> None:
     """A single member declaring more bytes than the cap is rejected."""
     monkeypatch.setattr(
-        "esphome_device_builder.controllers.remote_build.artifacts_tarball."
-        "FIRMWARE_MAX_TOTAL_BYTES",
+        "esphome_device_builder.helpers.tarball_read.FIRMWARE_MAX_TOTAL_BYTES",
         128,
     )
     tarball = _build_minimal_tarball(

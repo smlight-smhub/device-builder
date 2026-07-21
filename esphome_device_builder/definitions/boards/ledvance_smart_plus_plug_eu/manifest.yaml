@@ -27,7 +27,7 @@ pins:
   occupied_by: led
 - gpio: 24
   available: false
-  occupied_by: Outlet
+  occupied_by: LEDVANCE SmartPlus Plug Outlet
 - gpio: 26
   available: false
   occupied_by: sensor.hlw8012
@@ -40,6 +40,11 @@ featured_components:
       value:
         number: 6
         inverted: true
+      locked: true
+    filters:
+      value:
+      - delayed_on: 10ms
+      - delayed_off: 10ms
       locked: true
     id: button1
     name: button1
@@ -73,7 +78,7 @@ featured_components:
         inverted: true
         number: 8
       locked: true
-    update_interval: $update_interval_seconds
+    update_interval: 30s
     initial_mode: VOLTAGE
     change_mode_every: '4294967295'
     voltage_divider: '4456'
@@ -83,14 +88,18 @@ featured_components:
   component_id: sensor.uptime
   fields:
     unit_of_measurement: minutes
+    filters:
+      value:
+      - lambda: return x / 60.0;
+      locked: true
     id: sensor_uptime_1
-    name: Uptime
+    name: LEDVANCE SmartPlus Plug Uptime
 - id: sensor_wifi_signal_1
   component_id: sensor.wifi_signal
   fields:
     update_interval: 60s
     id: sensor_wifi_signal_1
-    name: Signal
+    name: LEDVANCE SmartPlus Plug Signal
 - id: outlet
   component_id: switch.gpio
   fields:
@@ -99,10 +108,10 @@ featured_components:
       locked: true
     icon: mdi:power-socket-eu
     id: outlet
-    name: Outlet
+    name: LEDVANCE SmartPlus Plug Outlet
 source:
   type: esphome-devices
   remote_id: LEDVANCE-SMART-PLUS-PLUG-EU
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/LEDVANCE-SMART-PLUS-PLUG-EU/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: fdae9d547face7c179dcf148bd54482d06c49ebb6b8a772e913ef6e18b46c926

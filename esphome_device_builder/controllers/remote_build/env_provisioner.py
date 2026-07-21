@@ -1,14 +1,15 @@
-"""Provision + cache one esphome venv per release version (receiver-side).
+"""Provision + cache one esphome venv per pinnable version (receiver-side).
 
 A receiver whose installed esphome differs from the offloader's builds the
 offloader's version into an isolated venv and compiles from it, instead of
 handing back firmware built with the wrong version. Venvs are cached per
-release under ``<data_dir>/.remote_builds/venvs/esphome-<version>/`` and reused
+version under ``<data_dir>/.remote_builds/venvs/esphome-<version>/`` and reused
 across every device/build; a per-version lock serialises concurrent first
 builds of the same version while different versions build concurrently.
 
-RELEASE versions only: a dev / prerelease target can't be pinned to a
-reproducible ``pip install esphome==<version>`` and is refused.
+Pinnable versions only (final releases and a/b/rc pre-releases, which PyPI
+publishes): a dev / local target can't be pinned to a reproducible
+``pip install esphome==<version>`` and is refused.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import asyncio
 import logging
 import re
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from esphome.core import CORE
@@ -25,7 +27,7 @@ from esphome.helpers import rmtree as _esphome_rmtree
 from ...helpers import remote_build_layout
 from ...helpers.async_ import run_in_executor
 from ...helpers.subprocess import run_subprocess_capture
-from ...helpers.version_compat import is_release_version
+from ...helpers.version_compat import is_pinnable_version, pinnable_version_key
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -46,7 +48,7 @@ class EnvProvisionError(Exception):
 
 class EnvProvisioner:
     """
-    Create + cache one esphome venv per release version, keyed by version.
+    Create + cache one esphome venv per pinnable version, keyed by version.
 
     Callers serialize on the compile lane (``provision`` in COMPILE,
     ``clean_all`` in RESET_BUILD_ENV, ``sweep_stale`` at start), so a wipe
@@ -71,20 +73,40 @@ class EnvProvisioner:
         base = self._data_dir if self._data_dir is not None else Path(CORE.data_dir)
         return remote_build_layout.venvs_dir(base)
 
-    async def provision(self, version: str) -> list[str]:
-        """Return the esphome command for *version*, building its venv on first use.
+    async def provision(
+        self, version: str, *, on_build: Callable[[str], None] | None = None
+    ) -> list[str]:
+        """
+        Return the esphome command for *version*, building its venv on first use.
 
-        Raises :class:`EnvProvisionError` for a non-release version, or a venv
+        ``on_build`` fires once with a status line when a cache miss means
+        a venv build (a multi-minute ``pip install``) is about to run; a
+        warm or healthy cached venv fires nothing.
+
+        Raises :class:`EnvProvisionError` for an unpinnable version, or a venv
         that won't build or fails its health check; a bad venv is removed so a
         retry starts clean. A warm-cached venv deleted out-of-band re-provisions
         rather than handing back a cmd for a missing interpreter.
         """
-        if not is_release_version(version):
-            raise EnvProvisionError(f"cannot provision non-release esphome version {version!r}")
+        if not is_pinnable_version(version):
+            raise EnvProvisionError(
+                f"cannot provision esphome version {version!r} (not a PyPI release or pre-release)"
+            )
         venv = self.venvs_dir / f"{_VENV_PREFIX}{version}"
         async with self._lock_for(version):
             if not await self._warm(venv, version):
                 if not await self._is_healthy(venv, version):
+                    if on_build is not None:
+                        # Best-effort observer: a raising hook must not
+                        # fail a provision the build could survive.
+                        try:
+                            on_build(
+                                f"Provisioning esphome {version} into an isolated "
+                                "environment; the first build for a version installs "
+                                "it from PyPI and can take a few minutes...\n"
+                            )
+                        except Exception:
+                            _LOGGER.exception("provision on_build hook failed")
                     await self._build(version, venv)
                     if not await self._is_healthy(venv, version):
                         await run_in_executor(_rmtree, venv)
@@ -103,7 +125,7 @@ class EnvProvisioner:
         ``pio_components``, PIO cache) — but only when the venv is already
         cached from the build; a clean is never worth a ``pip install``.
         """
-        if not is_release_version(version):
+        if not is_pinnable_version(version):
             return None
         venv = self.venvs_dir / f"{_VENV_PREFIX}{version}"
         async with self._lock_for(version):
@@ -116,15 +138,15 @@ class EnvProvisioner:
     async def sweep_stale(self, installed_version: str) -> None:
         """Remove cached venvs older than *installed_version* (a startup sweep).
 
-        No-op when *installed_version* isn't a plain release (a dev receiver),
+        No-op when *installed_version* isn't pinnable (a dev receiver),
         since older / newer can't be ordered against it. Runs at receiver start
         before any build, so it never races a provision.
         """
-        if not is_release_version(installed_version):
+        if not is_pinnable_version(installed_version):
             return
-        installed_key = _release_key(installed_version)
+        installed_key = pinnable_version_key(installed_version)
         for venv, version in await run_in_executor(self._list_venvs):
-            if _release_key(version) < installed_key:
+            if pinnable_version_key(version) < installed_key:
                 _LOGGER.info(
                     "Removing stale esphome venv %s (older than installed %s)",
                     version,
@@ -153,7 +175,7 @@ class EnvProvisioner:
         return lock
 
     def _list_venvs(self) -> list[tuple[Path, str]]:
-        """``(dir, version)`` for each ``esphome-<release>`` venv on disk."""
+        """``(dir, version)`` for each ``esphome-<version>`` venv on disk."""
         venvs_dir = self.venvs_dir
         if not venvs_dir.is_dir():
             return []
@@ -162,7 +184,7 @@ class EnvProvisioner:
             if not child.is_dir() or not child.name.startswith(_VENV_PREFIX):
                 continue
             version = child.name[len(_VENV_PREFIX) :]
-            if is_release_version(version):
+            if is_pinnable_version(version):
                 found.append((child, version))
         return found
 
@@ -240,18 +262,6 @@ def _venv_esphome_cmd(venv: Path) -> list[str]:
 def _version_in_output(version: str, output: str) -> bool:
     """Whether *version* appears in *output* as a whole token, not inside a longer number."""
     return re.search(rf"(?<![\w.]){re.escape(version)}(?![\w.])", output) is not None
-
-
-def _release_key(version: str) -> tuple[int, ...]:
-    """Sort key for a plain-release version, trailing ``.0`` normalised out.
-
-    So ``2026.6`` and ``2026.6.0`` order equal rather than the shorter one
-    counting as older, which would sweep an effectively-installed venv.
-    """
-    parts = [int(part) for part in version.split(".")]
-    while len(parts) > 1 and parts[-1] == 0:
-        parts.pop()
-    return tuple(parts)
 
 
 def _prepare_venv_dir(venv: Path) -> None:

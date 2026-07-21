@@ -31,18 +31,12 @@ pins:
 - gpio: 6
   available: false
   occupied_by: button_b
-- gpio: 7
-  available: false
-  occupied_by: my_display
 - gpio: 9
   available: false
   occupied_by: button_d
 - gpio: 10
   available: false
   occupied_by: button_c
-- gpio: 15
-  available: false
-  occupied_by: my_display
 - gpio: 17
   available: false
   occupied_by: spi
@@ -88,6 +82,12 @@ featured_components:
     id:
       value: i2s_out
       locked: true
+- id: onboard_psram
+  component_id: psram
+  name: PSRAM
+  fields:
+    mode: octal
+    speed: 80MHz
 - id: button_up
   component_id: binary_sensor.gpio
   fields:
@@ -198,24 +198,6 @@ featured_components:
       locked: true
     id: button_select
     name: button_select
-- id: my_display
-  component_id: display.mipi_spi
-  fields:
-    model: ST7789V
-    dc_pin:
-      value: 15
-      locked: true
-    cs_pin:
-      value: 7
-      locked: true
-    rotation: 270
-    invert_colors: true
-    color_order: BGR
-    pixel_mode: 16bit
-    auto_clear_enabled: false
-    id: my_display
-  requires:
-  - spi_bus
 - id: lilka_speaker
   component_id: speaker.i2s_audio
   fields:
@@ -228,10 +210,11 @@ featured_components:
     bits_per_sample: 16bit
     id: lilka_speaker
   requires:
+  - onboard_psram
   - i2s_out
 source:
   type: esphome-devices
   remote_id: Lilka
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Lilka/index.md
-  upstream_revision: a3fac0e48920548cbdce5fc00cb8b05571b4d83e
+  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
   content_hash: 582d9b5114eec3ed9f633eedaa665eba652ee51ca26ef4c452ef87b90d4c30b4

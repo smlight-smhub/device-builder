@@ -46,7 +46,10 @@ from esphome_device_builder.controllers.remote_build._storage_codecs import (
     decode_pairings,
     encode_pairings,
 )
-from esphome_device_builder.controllers.remote_build._summaries import pairing_summary
+from esphome_device_builder.controllers.remote_build._summaries import (
+    pairing_summary,
+    peer_summary,
+)
 from esphome_device_builder.controllers.remote_build._validators import (
     PairLabelField,
     enforce_pin_match,
@@ -60,6 +63,9 @@ from esphome_device_builder.controllers.remote_build._validators import (
 from esphome_device_builder.controllers.remote_build.artifacts_download import (
     ArtifactsDownloadSender,
 )
+from esphome_device_builder.controllers.remote_build.display_identity import (
+    dashboard_display_identity,
+)
 from esphome_device_builder.controllers.remote_build.peer_link_client import (
     PreviewResult,
 )
@@ -72,6 +78,7 @@ from esphome_device_builder.helpers.peer_link_identity import PeerLinkIdentitySt
 from esphome_device_builder.helpers.remote_build_layout import RemoteBuildPath
 from esphome_device_builder.helpers.version_compat import VersionMatchPolicy
 from esphome_device_builder.models import (
+    DEFAULT_CLEANUP_TTL_SECONDS,
     ErrorCode,
     EventType,
     IdentityView,
@@ -106,6 +113,7 @@ def _fake_service_info(
     server_version: str = "1.2.3",
     esphome_version: str = "2026.5.0",
     friendly_name: str = "",
+    ha_addon: bool = False,
 ) -> MagicMock:
     """Build a stand-in for ``AsyncServiceInfo`` carrying the fields we read."""
     info = MagicMock()
@@ -119,6 +127,8 @@ def _fake_service_info(
     }
     if friendly_name:
         info.properties[b"friendly_name"] = friendly_name.encode("utf-8")
+    if ha_addon:
+        info.properties[b"ha_addon"] = b"1"
     return info
 
 
@@ -235,6 +245,7 @@ def test_peer_from_service_info_handles_missing_txt_keys() -> None:
     assert peer.server_version == ""
     assert peer.esphome_version == ""
     assert peer.friendly_name == ""
+    assert peer.ha_addon is False
 
 
 def test_peer_from_service_info_reads_friendly_name_from_txt() -> None:
@@ -243,6 +254,14 @@ def test_peer_from_service_info_reads_friendly_name_from_txt() -> None:
     peer = peer_from_service_info(f"esphome-builder-jwywnve.{SERVICE_TYPE}", info)
     assert peer.name == "esphome-builder-jwywnve"
     assert peer.friendly_name == "MacBook-Pro"
+
+
+def test_peer_from_service_info_reads_ha_addon_from_txt() -> None:
+    """The ``ha_addon`` TXT flag surfaces so peers can label the add-on."""
+    info = _fake_service_info(friendly_name="Home Assistant", ha_addon=True)
+    peer = peer_from_service_info(f"desktop.{SERVICE_TYPE}", info)
+    assert peer.ha_addon is True
+    assert peer.friendly_name == "Home Assistant"
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +315,7 @@ def test_is_self_endpoint_returns_false_when_advertiser_absent(tmp_path: Path) -
     controller = _make_controller(config_dir=tmp_path)
 
     controller.offloader._db._dashboard_advertiser = None
+    controller.offloader._db.dashboard_advertiser = None
     assert controller.offloader._is_self_endpoint("any.host.", 6052) is False
 
     advertiser = MagicMock()
@@ -1392,6 +1412,20 @@ async def test_set_settings_round_trips(tmp_path: Path) -> None:
     assert read == RemoteBuildSettingsView(enabled=True)
 
 
+async def test_settings_snapshot_tracks_ram_canonical_settings(tmp_path: Path) -> None:
+    """``settings_snapshot`` reads the RAM-canonical scalars, following writes."""
+    controller = _make_controller(config_dir=tmp_path)
+    assert controller.receiver.settings_snapshot() == {
+        "enabled": True,
+        "cleanup_ttl_seconds": DEFAULT_CLEANUP_TTL_SECONDS,
+    }
+    await controller.receiver.set_settings(enabled=False, cleanup_ttl_seconds=7200)
+    assert controller.receiver.settings_snapshot() == {
+        "enabled": False,
+        "cleanup_ttl_seconds": 7200,
+    }
+
+
 async def test_set_settings_rejects_non_bool(tmp_path: Path) -> None:
     """
     Non-boolean ``enabled`` raises ``INVALID_ARGS``, doesn't coerce.
@@ -1709,6 +1743,7 @@ async def test_start_skips_self_capture_when_no_advertiser(
     controller = _make_controller(config_dir=tmp_path)
     controller.offloader._db.devices.zeroconf = MagicMock()
     controller.offloader._db._dashboard_advertiser = None
+    controller.offloader._db.dashboard_advertiser = None
 
     await controller.start()
     assert controller.offloader.state.own_instance_name is None
@@ -1907,7 +1942,12 @@ def test_validate_port_rejects_out_of_range(port: int) -> None:
 
 
 def _stub_identity_db(
-    controller: RemoteBuildController, *, listener_bound: bool = False
+    controller: RemoteBuildController,
+    *,
+    listener_bound: bool = False,
+    listener_host: str | None = None,
+    listener_addresses: list[str] | None = None,
+    listener_port: int | None = None,
 ) -> AsyncMock:
     """
     Wire the controller's ``_db`` for an identity-rotation test.
@@ -1929,6 +1969,9 @@ def _stub_identity_db(
     reload_mock = AsyncMock(return_value=listener_bound)
     controller.offloader._db.reload_remote_build_identity = reload_mock
     controller.offloader._db.is_remote_build_listener_bound = listener_bound
+    controller.offloader._db.remote_build_listener_host = listener_host
+    controller.offloader._db.remote_build_listener_addresses = listener_addresses or []
+    controller.offloader._db.remote_build_listener_port = listener_port
     controller.offloader._db.bus = MagicMock()
     return reload_mock
 
@@ -1981,6 +2024,35 @@ async def test_get_identity_reflects_listener_bound_state(tmp_path: Path) -> Non
     _stub_identity_db(controller, listener_bound=False)
     unbound_view = await controller.receiver.get_identity()
     assert unbound_view.listener_bound is False
+
+
+async def test_identity_views_report_listener_address(tmp_path: Path) -> None:
+    """Both identity views mirror the advertised address; empty while down."""
+    controller = _make_controller(config_dir=tmp_path)
+    _stub_identity_db(
+        controller,
+        listener_bound=True,
+        listener_host="esphome-builder-abc.local",
+        listener_addresses=["192.168.1.5"],
+        listener_port=6055,
+    )
+    bound_view = await controller.receiver.get_identity()
+    assert bound_view.listener_host == "esphome-builder-abc.local"
+    assert bound_view.listener_addresses == ["192.168.1.5"]
+    assert bound_view.listener_port == 6055
+
+    # The rotate path builds its view through separate control flow
+    # (reload_remote_build_identity) — pin the same fields there.
+    rotated_view = await controller.receiver.rotate_identity()
+    assert rotated_view.listener_host == "esphome-builder-abc.local"
+    assert rotated_view.listener_addresses == ["192.168.1.5"]
+    assert rotated_view.listener_port == 6055
+
+    _stub_identity_db(controller, listener_bound=False)
+    unbound_view = await controller.receiver.get_identity()
+    assert unbound_view.listener_host is None
+    assert unbound_view.listener_addresses == []
+    assert unbound_view.listener_port is None
 
 
 async def test_get_identity_does_not_leak_cert_or_key_pem(tmp_path: Path) -> None:
@@ -2550,6 +2622,9 @@ def test_stored_peer_refresh_from_pair_request_updates_all_documented_fields() -
         label="renamed",
         paired_at=2.0,
         peer_ip="10.0.0.7",
+        friendly_name="Nicks-Mac-Studio",
+        ha_addon=True,
+        label_auto=True,
     )
 
     # All documented fields refreshed.
@@ -2558,6 +2633,9 @@ def test_stored_peer_refresh_from_pair_request_updates_all_documented_fields() -
     assert peer.label == "renamed"
     assert peer.paired_at == 2.0
     assert peer.peer_ip == "10.0.0.7"
+    assert peer.friendly_name == "Nicks-Mac-Studio"
+    assert peer.ha_addon is True
+    assert peer.label_auto is True
     # ``dashboard_id`` is the primary key — intentionally left
     # alone; mutating it would orphan the dict entry under the
     # caller.
@@ -3143,6 +3221,9 @@ async def test_record_pair_request_fires_event(tmp_path: Path) -> None:
         "label": "alpha",
         "peer_ip": "192.168.1.10",
         "paired_at": stored.paired_at,
+        "friendly_name": "",
+        "ha_addon": False,
+        "label_auto": False,
     }
     # ``peer_ip`` is persisted on the StoredPeer (rather than
     # carried only on the live event) so a snapshot-loaded
@@ -4829,6 +4910,105 @@ async def test_get_offloader_settings_returns_master_plus_pairings(tmp_path: Pat
     assert view.remote_builds_enabled is False
     assert [p.pin_sha256 for p in view.pairings] == [pairing.pin_sha256]
     assert view.pairings[0].enabled is True  # Default for the seeded row.
+
+
+def test_pairing_summary_surfaces_auto_provision_supported() -> None:
+    """``PairingSummary.auto_provision_supported`` mirrors the storage-shape field."""
+    pairing = _valid_stored_pairing()
+    pairing.auto_provision_supported = True
+    summary = pairing_summary(pairing, connected=False)
+    assert summary.auto_provision_supported is True
+    pairing.auto_provision_supported = False
+    assert pairing_summary(pairing, connected=False).auto_provision_supported is False
+
+
+def test_pairing_summary_surfaces_display_identity() -> None:
+    """``PairingSummary.friendly_name`` / ``ha_addon`` mirror the storage-shape fields."""
+    pairing = _valid_stored_pairing()
+    pairing.friendly_name = "Nicks-Mac-Studio"
+    pairing.ha_addon = True
+    summary = pairing_summary(pairing, connected=False)
+    assert summary.friendly_name == "Nicks-Mac-Studio"
+    assert summary.ha_addon is True
+
+
+def test_pairing_summary_surfaces_reset_capability() -> None:
+    """``PairingSummary.reset_build_env_supported`` mirrors the storage-shape field."""
+    pairing = _valid_stored_pairing()
+    pairing.reset_build_env_supported = True
+    assert pairing_summary(pairing, connected=False).reset_build_env_supported is True
+
+
+def test_peer_summary_surfaces_display_identity() -> None:
+    """``PeerSummary`` mirrors ``friendly_name`` / ``ha_addon`` / ``label_auto``."""
+    peer = _stored_peer()
+    peer.friendly_name = "Office-PC"
+    peer.ha_addon = True
+    peer.label_auto = True
+    summary = peer_summary(peer, status=PeerStatus.APPROVED, connected=False)
+    assert summary.friendly_name == "Office-PC"
+    assert summary.ha_addon is True
+    assert summary.label_auto is True
+
+
+def test_stored_pairing_old_sidecar_defaults_display_identity() -> None:
+    """A sidecar row predating the identity fields loads with defaults."""
+    row = _valid_stored_pairing().to_dict()
+    del row["friendly_name"]
+    del row["ha_addon"]
+    pairing = StoredPairing.from_dict(row)
+    assert pairing.friendly_name == ""
+    assert pairing.ha_addon is False
+
+
+def test_stored_pairing_rejects_oversize_friendly_name() -> None:
+    """The disk validator bounds ``friendly_name`` at the shared cap."""
+    row = _valid_stored_pairing().to_dict()
+    row["friendly_name"] = "x" * 129
+    with pytest.raises(ValueError, match="friendly_name"):
+        StoredPairing.from_dict(row)
+
+
+def test_stored_pairing_old_sidecar_defaults_receiver_label_auto() -> None:
+    """A sidecar row predating ``receiver_label_auto`` loads as ``False``."""
+    row = _valid_stored_pairing().to_dict()
+    del row["receiver_label_auto"]
+    pairing = StoredPairing.from_dict(row)
+    assert pairing.receiver_label_auto is False
+
+
+def test_stored_peer_old_sidecar_defaults_display_identity() -> None:
+    """A receiver peers row predating the identity fields loads with defaults."""
+    row = _stored_peer().to_dict()
+    del row["friendly_name"]
+    del row["ha_addon"]
+    del row["label_auto"]
+    peer = StoredPeer.from_dict(row)
+    assert peer.friendly_name == ""
+    assert peer.ha_addon is False
+    assert peer.label_auto is False
+
+
+def test_dashboard_display_identity_reads_advertiser() -> None:
+    """Running advertiser wins; ``ha_addon`` reads the settings flag."""
+    db = MagicMock()
+    db.dashboard_advertiser.friendly_name = "Nicks-Mac-Studio"
+    db.settings.on_ha_addon = True
+    assert dashboard_display_identity(db) == ("Nicks-Mac-Studio", True)
+
+
+def test_dashboard_display_identity_falls_back_without_advertiser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No advertiser (zeroconf down) → the hostname-derived default label."""
+    monkeypatch.setattr(
+        "esphome_device_builder.controllers.remote_build.display_identity.default_friendly_name",
+        lambda: "fallback-host",
+    )
+    db = MagicMock()
+    db.dashboard_advertiser = None
+    db.settings.on_ha_addon = False
+    assert dashboard_display_identity(db) == ("fallback-host", False)
 
 
 def test_pairing_summary_surfaces_enabled_field(tmp_path: Path) -> None:

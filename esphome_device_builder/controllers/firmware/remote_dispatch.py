@@ -32,7 +32,7 @@ from ...models import (
     JobStatus,
 )
 from . import lifecycle
-from .helpers import _ingest_output_line
+from .helpers import _ingest_notice_line
 from .remote_runner import ProvisionUnavailableError, RemoteServerLostError, run_remote_job
 
 if TYPE_CHECKING:
@@ -161,13 +161,7 @@ def _dispatch_to_server(controller: FirmwareController, job: FirmwareJob, pin_sh
         # can't strand the compile (the next pass picks a live server).
         controller.state.remote_dispatch.wake.set()
         return
-    job.apply_build_source(
-        JobBuildSource.for_server(
-            pin_sha256=pairing.pin_sha256,
-            label=pairing.label,
-            esphome_version=pairing.esphome_version,
-        )
-    )
+    job.apply_build_source(JobBuildSource.for_pairing(pairing))
     # ``create_background_task`` is eager: ``_drive_remote`` runs its
     # ``begin_run`` prologue (stamps RUNNING, fires JOB_STARTED) synchronously
     # before ``start()`` records the in-flight entry. That's safe — no
@@ -240,10 +234,8 @@ def _requeue_after_server_loss(
         controller._finalize_terminal(job, JobStatus.FAILED, error=error)
         pool.forget_losses(job.job_id)
         return
-    _ingest_output_line(
-        job,
-        controller.bus,
-        f"\n*** build server lost ({reason}); re-routing to another worker ***\n",
+    _ingest_notice_line(
+        job, controller.bus, f"build server lost ({reason}); re-routing to another worker"
     )
     _return_to_pool(controller, job)
     _LOGGER.info("Remote compile %s: server lost, re-routing (attempt %d)", job.job_id, attempt)
@@ -259,10 +251,10 @@ def _requeue_after_provision_failure(
     server loss, which re-routes REMOTE→REMOTE). Logged both to the job's output
     stream (visible in the dialog) and the server log.
     """
-    _ingest_output_line(
+    _ingest_notice_line(
         job,
         controller.bus,
-        f"\n*** receiver couldn't provision esphome ({reason}); building locally instead ***\n",
+        f"receiver couldn't provision esphome ({reason}); building locally instead",
     )
     job.clear_run_state()
     _fallback_to_local(controller, job)
