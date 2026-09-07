@@ -95,5 +95,5 @@ source:
   type: esphome-devices
   remote_id: Govee-H601A-6in-recessed-RGBCCT-light
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Govee-H601A-6in-recessed-RGBCCT-light/index.md
-  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
+  upstream_revision: 0960c5c1fb74b1e9d60829bf911f47b0e8cf2eb1
   content_hash: c70ae990f8215691610fe554bcbb48131bbbf29743aca283867740674aabfc35

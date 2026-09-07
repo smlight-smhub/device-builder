@@ -4320,5 +4320,5 @@ source:
   type: esphome-devices
   remote_id: KinCony-T128M
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/KinCony-T128M/index.md
-  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
+  upstream_revision: 0960c5c1fb74b1e9d60829bf911f47b0e8cf2eb1
   content_hash: 3ac74ba0530e422755da62d5b5eedd831b503985981bb55399b6c1e41beb4274

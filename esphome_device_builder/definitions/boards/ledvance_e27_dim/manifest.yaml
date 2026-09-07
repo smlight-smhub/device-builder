@@ -45,5 +45,5 @@ source:
   type: esphome-devices
   remote_id: LEDVANCE-E27-DIM
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/LEDVANCE-E27-DIM/index.md
-  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
+  upstream_revision: 0960c5c1fb74b1e9d60829bf911f47b0e8cf2eb1
   content_hash: 038327e2a4e718e1dc78aa5223e15c793584ce08bd63b317e518ce7b654a7c18

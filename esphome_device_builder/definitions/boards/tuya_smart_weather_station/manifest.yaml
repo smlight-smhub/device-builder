@@ -205,5 +205,5 @@ source:
   type: esphome-devices
   remote_id: Tuya-Smart-Weather-Station
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Tuya-Smart-Weather-Station/index.md
-  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
+  upstream_revision: 0960c5c1fb74b1e9d60829bf911f47b0e8cf2eb1
   content_hash: de824936d1c465512bf4f1d81279f62a4361e0470215672845ea53170cd18beb

@@ -149,5 +149,5 @@ source:
   type: esphome-devices
   remote_id: Knightsbridge-CU9KW
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Knightsbridge-CU9KW/index.md
-  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
+  upstream_revision: 0960c5c1fb74b1e9d60829bf911f47b0e8cf2eb1
   content_hash: fac3211801887b58fe4a0a0423f636cadf44e5a18b0bae4787ff8c4edb5e28b0

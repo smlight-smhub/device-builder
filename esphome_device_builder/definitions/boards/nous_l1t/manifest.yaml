@@ -78,5 +78,5 @@ source:
   type: esphome-devices
   remote_id: Nous-L1t
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Nous-L1t/index.md
-  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
+  upstream_revision: 0960c5c1fb74b1e9d60829bf911f47b0e8cf2eb1
   content_hash: 60a164972a6253e5eba552c07ce7eacfe926f65884d3497a363b40c2cd79dc4c

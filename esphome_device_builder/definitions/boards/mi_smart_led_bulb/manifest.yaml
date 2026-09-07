@@ -79,5 +79,5 @@ source:
   type: esphome-devices
   remote_id: Mi-Smart-LED-Bulb
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Mi-Smart-LED-Bulb/index.md
-  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
+  upstream_revision: 0960c5c1fb74b1e9d60829bf911f47b0e8cf2eb1
   content_hash: 6b38a91ade90b4476cefd9b89c78549cc39e88ff2c1d51e56c40dedb26a1994f

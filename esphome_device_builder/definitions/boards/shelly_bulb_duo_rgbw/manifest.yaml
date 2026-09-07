@@ -80,5 +80,5 @@ source:
   type: esphome-devices
   remote_id: Shelly-Bulb-Duo-RGBW
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Shelly-Bulb-Duo-RGBW/index.md
-  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
+  upstream_revision: 0960c5c1fb74b1e9d60829bf911f47b0e8cf2eb1
   content_hash: 4b29f48d668f018fdd114835bf12fdad1d2cbdb30c6d58b47ade09cb743d95f5
