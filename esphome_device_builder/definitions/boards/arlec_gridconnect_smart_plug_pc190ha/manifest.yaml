@@ -72,5 +72,5 @@ source:
   type: esphome-devices
   remote_id: Arlec-GridConnect-Smart-Plug-PC190HA
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Arlec-GridConnect-Smart-Plug-PC190HA/index.md
-  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
+  upstream_revision: ee4ae97596b6452ab9d242ff6974f4c245b5c40e
   content_hash: 30ca79595b88edcc40e3a8f2b162f96298d6da82117c543fa0c7c143fdcb45f0

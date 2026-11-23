@@ -88,5 +88,5 @@ source:
   type: esphome-devices
   remote_id: Kogan-Smarterhome-Smart-Plug-With-Energy-Meter
   upstream_url: https://github.com/esphome/devices.esphome.io/blob/main/src/docs/devices/Kogan-Smarterhome-Smart-Plug-With-Energy-Meter/index.md
-  upstream_revision: cdaade7889f0c6892197672dfd971a73245bafcf
+  upstream_revision: ee4ae97596b6452ab9d242ff6974f4c245b5c40e
   content_hash: 800caf139b0e7d41144822ba7c861e38e6661244ddc9afdd852b137adf2df383
